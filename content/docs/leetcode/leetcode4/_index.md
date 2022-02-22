@@ -32,29 +32,27 @@ The overall run time complexity should be O(log (m+n)).
 
 中位数的含义是将两个数组分成两个部分，两个数组的左半部分数量和与右半部分数量和相等
 那么假设i和j分别将两个数组分割成左半部分和右半部分，可以得到
+
 $$
 j = \frac{(m + n)}{2} - i
 $$
 
-<canvas id="drawing" width="500" height="200"></canvas>
-<script type="module">
-    import { drawArrayRect } from "/lib/diy_canvas/drawArrayRect.js";
-    var drawing = document.getElementById("drawing");
-    var ctx = drawing.getContext("2d");    //获取2D上下文对象
-    drawArrayRect(ctx, [5, 5], [0, 1, 40, 99]);
-    drawArrayRect(ctx, [5, 105], [0, 1, 40, 99]);
-</script>
-
 并且左半部分的最大值一定小于等于右半部分的最小值
+
 $$
 max(nums_{1left}, nums_{2left}) \le min(nums_{1right}, nums_{2right})
 $$
+
 按照两个数组中小的那个为准，$i$ 作为二分查找的目标值。
+
 当 $i$ 比预期大，可以得到
+
 $$
 max(nums_{1left}, nums_{2left}) = nums_1[i] > nums_2[j] = min(nums_{1right}, nums_{2right})
 $$
+
 同理 $i$ 比预期小，可以得到
+
 $$
 max(nums_{1left}, nums_{2left}) = nums_2[j] > nums_1[i] = min(nums_{1right}, nums_{2right})
 $$
