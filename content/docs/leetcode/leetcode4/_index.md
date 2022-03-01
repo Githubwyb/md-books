@@ -1,5 +1,5 @@
 ---
-weight: 10
+weight: 4
 title: "4. Median of Two Sorted Arrays"
 ---
 

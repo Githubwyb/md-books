@@ -1,5 +1,5 @@
 ---
-weight: 10
+weight: 8
 title: "8. String to Integer (atoi)"
 ---
 

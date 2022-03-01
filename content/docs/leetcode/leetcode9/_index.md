@@ -1,5 +1,5 @@
 ---
-weight: 10
+weight: 9
 title: "9. Palindrome Number"
 ---
 

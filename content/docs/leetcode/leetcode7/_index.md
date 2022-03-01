@@ -1,5 +1,5 @@
 ---
-weight: 10
+weight: 7
 title: "7. Reverse Integer"
 ---
 

@@ -1,5 +1,5 @@
 ---
-weight: 10
+weight: 6
 title: "6. ZigZag Conversion"
 ---
 
@@ -31,7 +31,7 @@ string convert(string s, int numRows);
 
 所以直接写循环搞定
 
-```golang
+```golang10
 func convert(s string, numRows int) string {
 	if numRows == 1 {
 		return s

@@ -1,5 +1,5 @@
 ---
-weight: 10
+weight: 3
 title: "3. Longest Substring Without Repeating Characters"
 ---
 
