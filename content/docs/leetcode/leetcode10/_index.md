@@ -29,7 +29,7 @@ The matching should cover the entire input string (not partial).
 
 ## 代码实现
 
-```golang
+```go
 func matchSubStr(s string, i int, p string, j int) bool {
 	if j == len(p) {
 		return i == len(s)
@@ -123,7 +123,7 @@ $$
 
 代码看起来和上面递归差不多，但是leetcode耗时要少，我也不知道为啥
 
-```golang
+```go
 func getStatus(s string, i int, p string, j int) bool {
 	if j < 0 {
 		return i < 0

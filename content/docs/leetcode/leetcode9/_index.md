@@ -16,7 +16,7 @@ An integer is a palindrome when it reads the same backward as forward.
 
 - 最简单直接的想法，转成字符串，然后判断
 
-```golang
+```go
 func isPalindrome(x int) bool {
 	s := fmt.Sprint(x)
 	i := 0
@@ -95,7 +95,7 @@ right3 --> mid
 
 代码实现
 
-```golang
+```go
 func isPalindrome(x int) bool {
 	if x == 0 {
 		return true

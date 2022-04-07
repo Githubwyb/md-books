@@ -46,7 +46,7 @@ $$
 
 为了防止每次对x进行除法和取余运算，直接转成字符串处理
 
-```golang
+```go
 func reverse(x int) (result int) {
 	tmp := fmt.Sprint(x)
 	for i := range(tmp) {

@@ -28,7 +28,7 @@ Note:
 
 由于没有限制64位，直接用64位判断溢出
 
-```golang
+```go
 func myAtoi(s string) int {
 	var result int64
 	sign := 1

@@ -31,7 +31,7 @@ string convert(string s, int numRows);
 
 所以直接写循环搞定
 
-```golang10
+```go10
 func convert(s string, numRows int) string {
 	if numRows == 1 {
 		return s

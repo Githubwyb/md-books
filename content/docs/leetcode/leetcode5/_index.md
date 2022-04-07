@@ -20,7 +20,7 @@ Given a string s, return the longest palindromic substring in s.
 - 顺便判断一下i作为中心线前一个的情况
 - 时间复杂度 $O(n^2)$
 
-```golang
+```go
 func longestPalindrome(s string) (result string) {
 	for i := range s {
 		// think medium of palindrome as i
@@ -62,7 +62,7 @@ func longestPalindrome(s string) (result string) {
 - 不过稍微有点不好理解
 - 就是在思路2的基础上，按照前面某个回文串（要求i在其臂长内）的中心进行对称一下，对称点已经有结果就可以少判断已经判断的地方
 
-```golang
+```go
 func longestPalindrome(s string) string {
 	start, end := 0, -1
 	t := "#"
