@@ -1,0 +1,9 @@
+<canvas id="drawing" width="500" height="500"></canvas>
+<script type="module">
+    import { drawArrayRect } from "./lib/diy_canvas/drawArrayRect.js";
+    var drawing = document.getElementById("drawing");
+    var ctx = drawing.getContext("2d");    //获取2D上下文对象
+
+    drawArrayRect(ctx, [5, 5], [0, 1, 40, 99]);
+    drawArrayRect(ctx, [5, 105], [0, 1, 40, 99]);
+</script>

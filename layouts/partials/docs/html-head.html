@@ -1,0 +1,95 @@
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="{{ default .Summary .Description }}">
+<meta name="theme-color" content="#FFFFFF">
+
+{{- template "_internal/opengraph.html" . -}}
+
+<title>{{ partial "docs/title" . }} | {{ .Site.Title -}}</title>
+
+{{- $manifest := resources.Get "manifest.json" | resources.ExecuteAsTemplate "manifest.json" . }}
+<link rel="manifest" href="{{ $manifest.RelPermalink }}">
+<link rel="icon" href="{{ "favicon.png" | relURL }}" type="image/x-icon">
+
+{{- range .Translations }}
+<link rel="alternate" hreflang="{{ .Language.Lang }}" href="{{ .Permalink }}" title="{{ partial "docs/title" . }}">
+{{ end -}}
+
+<!-- Theme stylesheet, you can customize scss by creating `assets/custom.scss` in your website -->
+{{- $styles := resources.Get "book.scss" | resources.ExecuteAsTemplate "book.scss" . | resources.ToCSS | resources.Minify | resources.Fingerprint }}
+<link rel="stylesheet" href="{{ $styles.RelPermalink }}" integrity="{{ $styles.Data.Integrity }}">
+
+{{- if default true .Site.Params.BookSearch }}
+{{- $searchJSFile := printf "%s.search.js" .Language.Lang }}
+{{- $searchJS := resources.Get "search.js" | resources.ExecuteAsTemplate $searchJSFile . | resources.Minify | resources.Fingerprint }}
+<script defer src="{{ $searchJS.RelPermalink }}" integrity="{{ $searchJS.Data.Integrity }}"></script>
+{{ end -}}
+
+{{- if .Site.Params.BookServiceWorker }}
+{{- $swJS := resources.Get "sw-register.js" | resources.ExecuteAsTemplate "sw.js" . | resources.Minify | resources.Fingerprint }}
+<script defer src="{{ $swJS.RelPermalink }}" integrity="{{ $swJS.Data.Integrity }}"></script>
+{{ end -}}
+
+{{- template "_internal/google_analytics_async.html" . -}}
+
+<!-- RSS -->
+{{- with .OutputFormats.Get "rss" -}}
+  {{ printf `<link rel="%s" type="%s" href="%s" title="%s" />` .Rel .MediaType.Type .Permalink $.Site.Title | safeHTML }}
+{{ end -}}
+
+{{ "<!--" | safeHTML }}
+Made with Book Theme
+https://github.com/alex-shpak/hugo-book
+{{ "-->" | safeHTML }}
+
+<link rel="stylesheet" href="/katex/katex.min.css">
+<script src="/katex/katex.min.js"></script>
+<script src="/katex/auto-render.min.js"></script>
+
+<script>
+  document.addEventListener("DOMContentLoaded", function () {
+    renderMathInElement(document.body, {
+      delimiters: [
+        { left: "$$", right: "$$", display: true },
+        { left: "$", right: "$", display: false }
+      ]
+    });
+  });
+</script>
+
+{{ if or .Page.Params.plantuml .Site.Params.plantuml }}
+<!-- PlantUML -->
+<script src="/lib/plantuml-encoder.min.js" integrity="sha256-Qsk2KRBCN5qVZX7B+8+2IvQl1Aqc723qV1tBCQaVoqo=" crossorigin="anonymous"></script>
+<script>
+document.addEventListener("DOMContentLoaded", function(){
+  let plantumlPrefix = "language-plantuml";
+  Array.prototype.forEach.call(document.querySelectorAll("[class^=" + plantumlPrefix + "]"), function(code){
+    let image = document.createElement("IMG");
+    image.loading = 'lazy'; // Lazy loading
+    image.src = 'http://www.plantuml.com/plantuml/svg/~1' + plantumlEncoder.encode(code.innerText);
+    code.style.display = 'none';
+    code.parentNode.style = 'text-align: center; margin: 0; padding: 0; background-color: transparent;';
+
+    {{ if .Page.Site.Params.fancybox }}
+    // 对图片添加fancybox
+    let div = document.createElement("DIV");
+    div.className = "post-img-view";
+    let a = document.createElement("A");
+    a.setAttribute("data-fancybox", "gallery");
+    a.setAttribute("href", image.src);
+    a.appendChild(image);
+    div.appendChild(a);
+    code.parentNode.insertBefore(div, code);
+    {{ else }}
+    code.parentNode.insertBefore(image, code);
+    {{ end }}
+  });
+});
+</script>
+{{ end }}
+
+{{if .Page.Site.Params.fancybox }}
+<script src="/lib/fancybox/jquery.min.js"></script>
+<link rel="stylesheet" href="/lib/fancybox/jquery.fancybox.min.css" />
+<script src="/lib/fancybox/jquery.fancybox.min.js"></script>
+{{ end }}
