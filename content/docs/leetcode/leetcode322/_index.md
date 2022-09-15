@@ -1,5 +1,5 @@
 ---
-weight: 101
+weight: 322
 title: "- 322. Coin Change"
 ---
 
