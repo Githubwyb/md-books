@@ -88,3 +88,9 @@ EXPORT_SYMBOL(inet_add_protocol);
 int inet_del_protocol(const struct net_protocol *prot, unsigned char protocol);
 EXPORT_SYMBOL(inet_del_protocol);
 ```
+
+# 二、ipv4的socket创建后如何进行收包
+
+## 1. tcp包
+
+- socket创建的时候会调用`pf->create`对应ipv4的`inet_create`
