@@ -1,6 +1,6 @@
 ---
 weight: 864
-title: "* 736. Parse Lisp Expression"
+title: "* 864. Shortest Path to Get All Keys"
 ---
 
 # 题目
