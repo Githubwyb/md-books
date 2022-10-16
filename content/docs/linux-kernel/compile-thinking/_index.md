@@ -1,0 +1,11 @@
+---
+weight: 1
+bookFlatSection: false
+bookCollapseSection: true
+title: "编译思想"
+---
+
+# 一、`typeof((fifo) + 1) __tmp = (fifo);`
+
+- 想要外部传入的fifo为指针而非结构体，使用这个写法可以在编译期报错
+- 当传入是指针，加1操作不会影响typeof结果，如果是结构体，加1操作编译会直接报错
