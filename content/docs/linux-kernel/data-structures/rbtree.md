@@ -11,4 +11,4 @@ struct rb_node {
 } __attribute__((aligned(sizeof(long))));
 ```
 
-- 先参考 [地址对齐](/blogs/2022-06-06-computer-composition/#1-地址对齐) 了解为什么可以使用`__rb_parent_color`的低两位作为颜色
+- 先参考 [地址对齐](https://githubwyb.github.io/blogs/2022-06-06-computer-composition/#1-地址对齐) 了解为什么可以使用`__rb_parent_color`的低两位作为颜色
