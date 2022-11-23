@@ -6,6 +6,206 @@ weight: 10
 
 ## 1. ip层包入口
 
+- 最开始注册一个`packet_type`结构体，定义func为`ip_rcv`，被`inet_init`注册
+
+```cpp
+// net/ipv4/af_inet.c
+static struct packet_type ip_packet_type __read_mostly = {
+	.type = cpu_to_be16(ETH_P_IP),
+	.func = ip_rcv,
+	.list_func = ip_list_rcv,
+};
+
+static int __init inet_init(void)
+{
+	struct inet_protosw *q;
+	struct list_head *r;
+	int rc;
+
+	sock_skb_cb_check_size(sizeof(struct inet_skb_parm));
+
+	rc = proto_register(&tcp_prot, 1);
+	if (rc)
+		goto out;
+
+	rc = proto_register(&udp_prot, 1);
+	if (rc)
+		goto out_unregister_tcp_proto;
+
+	rc = proto_register(&raw_prot, 1);
+	if (rc)
+		goto out_unregister_udp_proto;
+
+	rc = proto_register(&ping_prot, 1);
+	if (rc)
+		goto out_unregister_raw_proto;
+
+	/*
+	 *	Tell SOCKET that we are alive...
+	 */
+
+	(void)sock_register(&inet_family_ops);
+
+#ifdef CONFIG_SYSCTL
+	ip_static_sysctl_init();
+#endif
+
+	/*
+	 *	Add all the base protocols.
+	 */
+
+	if (inet_add_protocol(&icmp_protocol, IPPROTO_ICMP) < 0)
+		pr_crit("%s: Cannot add ICMP protocol\n", __func__);
+	if (inet_add_protocol(&udp_protocol, IPPROTO_UDP) < 0)
+		pr_crit("%s: Cannot add UDP protocol\n", __func__);
+	if (inet_add_protocol(&tcp_protocol, IPPROTO_TCP) < 0)
+		pr_crit("%s: Cannot add TCP protocol\n", __func__);
+#ifdef CONFIG_IP_MULTICAST
+	if (inet_add_protocol(&igmp_protocol, IPPROTO_IGMP) < 0)
+		pr_crit("%s: Cannot add IGMP protocol\n", __func__);
+#endif
+
+	/* Register the socket-side information for inet_create. */
+	for (r = &inetsw[0]; r < &inetsw[SOCK_MAX]; ++r)
+		INIT_LIST_HEAD(r);
+
+	for (q = inetsw_array; q < &inetsw_array[INETSW_ARRAY_LEN]; ++q)
+		inet_register_protosw(q);
+
+	/*
+	 *	Set the ARP module up
+	 */
+
+	arp_init();
+
+	/*
+	 *	Set the IP module up
+	 */
+
+	ip_init();
+
+	/* Initialise per-cpu ipv4 mibs */
+	if (init_ipv4_mibs())
+		panic("%s: Cannot init ipv4 mibs\n", __func__);
+
+	/* Setup TCP slab cache for open requests. */
+	tcp_init();
+
+	/* Setup UDP memory threshold */
+	udp_init();
+
+	/* Add UDP-Lite (RFC 3828) */
+	udplite4_register();
+
+	raw_init();
+
+	ping_init();
+
+	/*
+	 *	Set the ICMP layer up
+	 */
+
+	if (icmp_init() < 0)
+		panic("Failed to create the ICMP control socket.\n");
+
+	/*
+	 *	Initialise the multicast router
+	 */
+#if defined(CONFIG_IP_MROUTE)
+	if (ip_mr_init())
+		pr_crit("%s: Cannot init ipv4 mroute\n", __func__);
+#endif
+
+	if (init_inet_pernet_ops())
+		pr_crit("%s: Cannot init ipv4 inet pernet ops\n", __func__);
+
+	ipv4_proc_init();
+
+	ipfrag_init();
+
+    // 注册到dev里面
+	dev_add_pack(&ip_packet_type);
+
+	ip_tunnel_core_init();
+
+	rc = 0;
+out:
+	return rc;
+out_unregister_raw_proto:
+	proto_unregister(&raw_prot);
+out_unregister_udp_proto:
+	proto_unregister(&udp_prot);
+out_unregister_tcp_proto:
+	proto_unregister(&tcp_prot);
+	goto out;
+}
+
+fs_initcall(inet_init);
+```
+
+- 驱动在受到包之后会调用func也就是`ip_rcv`
+- 可以看到这里是netflt的`PRE_ROUTING`链的挂载点
+
+```cpp
+// net/ipv4/ip_input.c
+/*
+ * IP receive entry point
+ */
+int ip_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt,
+	   struct net_device *orig_dev)
+{
+	struct net *net = dev_net(dev);
+
+	skb = ip_rcv_core(skb, net);
+	if (skb == NULL)
+		return NET_RX_DROP;
+
+	return NF_HOOK(NFPROTO_IPV4, NF_INET_PRE_ROUTING,
+		       net, NULL, skb, dev, NULL,
+		       ip_rcv_finish);
+}
+```
+
+- `ip_rcv_finish`这里处理了路由，如果路由不过就进行drop
+
+```cpp
+// net/ipv4/ip_input.c
+static int ip_rcv_finish(struct net *net, struct sock *sk, struct sk_buff *skb)
+{
+	struct net_device *dev = skb->dev;
+	int ret;
+
+	/* if ingress device is enslaved to an L3 master device pass the
+	 * skb to its handler for processing
+	 */
+	skb = l3mdev_ip_rcv(skb);
+	if (!skb)
+		return NET_RX_SUCCESS;
+
+    // 这个函数处理了路由
+	ret = ip_rcv_finish_core(net, sk, skb, dev, NULL);
+	if (ret != NET_RX_DROP)
+		ret = dst_input(skb);
+	return ret;
+}
+```
+
+- `dst_input`里面就是调用`ip_local_deiver`
+
+```cpp
+// include/net/dst.h
+INDIRECT_CALLABLE_DECLARE(int ip6_input(struct sk_buff *));
+INDIRECT_CALLABLE_DECLARE(int ip_local_deliver(struct sk_buff *));
+/* Input packet from network to transport.  */
+static inline int dst_input(struct sk_buff *skb)
+{
+	return INDIRECT_CALL_INET(skb_dst(skb)->input,
+				  ip6_input, ip_local_deliver, skb);
+}
+```
+
+- 这里也是netfilter的`LOCAL_IN`挂载点，可以在这里进行过滤
+
 ```cpp
 // net/ipv4/ip_input.c
 /*
@@ -24,6 +224,7 @@ int ip_local_deliver(struct sk_buff *skb) {
     }
 
     // 分片处理完毕调用ip_local_deliver_finish()
+    // NF_HOOK挂载netflt
     return NF_HOOK(NFPROTO_IPV4, NF_INET_LOCAL_IN,
                net, NULL, skb, skb->dev, NULL,
                ip_local_deliver_finish);

@@ -202,3 +202,115 @@ static inline void ____napi_schedule(struct softnet_data *sd,
 	__raise_softirq_irqoff(NET_RX_SOFTIRQ);
 }
 ```
+
+## 2. 注册poll到napi
+
+```cpp
+/**
+ *  igb_alloc_q_vector - Allocate memory for a single interrupt vector
+ *  @adapter: board private structure to initialize
+ *  @v_count: q_vectors allocated on adapter, used for ring interleaving
+ *  @v_idx: index of vector in adapter struct
+ *  @txr_count: total number of Tx rings to allocate
+ *  @txr_idx: index of first Tx ring to allocate
+ *  @rxr_count: total number of Rx rings to allocate
+ *  @rxr_idx: index of first Rx ring to allocate
+ *
+ *  We allocate one q_vector.  If allocation fails we return -ENOMEM.
+ **/
+static int igb_alloc_q_vector(struct igb_adapter *adapter,
+			      int v_count, int v_idx,
+			      int txr_count, int txr_idx,
+			      int rxr_count, int rxr_idx)
+{
+	...
+	/* initialize NAPI */
+	netif_napi_add(adapter->netdev, &q_vector->napi,
+		       igb_poll, 64);
+	...
+}
+```
+
+# 三、收包处理
+
+- 内核软中断处理收包后会调用注册的poll函数，也就是这里的`igb_poll`
+
+```cpp
+// drivers/net/ethernet/intel/igb/igb_main.c
+/**
+ *  igb_poll - NAPI Rx polling callback
+ *  @napi: napi polling structure
+ *  @budget: count of how many packets we should handle
+ **/
+static int igb_poll(struct napi_struct *napi, int budget)
+{
+	struct igb_q_vector *q_vector = container_of(napi,
+						     struct igb_q_vector,
+						     napi);
+	bool clean_complete = true;
+	int work_done = 0;
+
+#ifdef CONFIG_IGB_DCA
+	if (q_vector->adapter->flags & IGB_FLAG_DCA_ENABLED)
+		igb_update_dca(q_vector);
+#endif
+	if (q_vector->tx.ring)
+		clean_complete = igb_clean_tx_irq(q_vector, budget);
+
+	if (q_vector->rx.ring) {
+		int cleaned = igb_clean_rx_irq(q_vector, budget);
+
+		work_done += cleaned;
+		if (cleaned >= budget)
+			clean_complete = false;
+	}
+
+	/* If all work not completed, return budget and keep polling */
+	if (!clean_complete)
+		return budget;
+
+	/* Exit the polling mode, but don't re-enable interrupts if stack might
+	 * poll us due to busy-polling
+	 */
+	if (likely(napi_complete_done(napi, work_done)))
+		igb_ring_irq_enable(q_vector);
+
+	return work_done;
+}
+```
+
+- 在`igb_clean_rx_irq`函数里面调用到`napi_gro_receive`
+
+```cpp
+// drivers/net/ethernet/intel/igb/igb_main.c
+static int igb_clean_rx_irq(struct igb_q_vector *q_vector, const int budget)
+{
+	struct igb_adapter *adapter = q_vector->adapter;
+	struct igb_ring *rx_ring = q_vector->rx.ring;
+	struct sk_buff *skb = rx_ring->skb;
+	unsigned int total_bytes = 0, total_packets = 0;
+	u16 cleaned_count = igb_desc_unused(rx_ring);
+	unsigned int xdp_xmit = 0;
+	struct xdp_buff xdp;
+	u32 frame_sz = 0;
+	int rx_buf_pgcnt;
+
+	/* Frame size depend on rx_ring setup when PAGE_SIZE=4K */
+#if (PAGE_SIZE < 8192)
+	frame_sz = igb_rx_frame_truesize(rx_ring, 0);
+#endif
+	xdp_init_buff(&xdp, frame_sz, &rx_ring->xdp_rxq);
+
+	while (likely(total_packets < budget)) {
+		...
+		napi_gro_receive(&q_vector->napi, skb);
+
+		/* reset skb pointer */
+		skb = NULL;
+
+		/* update budget accounting */
+		total_packets++;
+	}
+	...
+}
+```

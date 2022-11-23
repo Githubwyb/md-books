@@ -31,6 +31,8 @@ eth -> eth: 从硬件buffer中读取数据帧创建sk_buff
 eth -> net: 将sk_buff通过函数napi_gro_receive调用到内核
 net -> net: napi_gro_receive => napi_skb_finish
 net -> net: napi_skb_finish => netif_receive_skb
+net -> net: netif_receive_skb => deliver_skb
+net -> net: deliver_skb => ip_rcv
 
 @enduml
 ```
@@ -658,4 +660,403 @@ static __latent_entropy void net_rx_action(struct softirq_action *h)
 	}
     ...
 }
+```
+
+- 给到`napi_poll`找对应的poll函数调用
+
+```cpp
+// net/core/dev.c
+static int napi_poll(struct napi_struct *n, struct list_head *repoll)
+{
+	bool do_repoll = false;
+	void *have;
+	int work;
+
+	list_del_init(&n->poll_list);
+
+	have = netpoll_poll_lock(n);
+
+	work = __napi_poll(n, &do_repoll);
+
+	if (do_repoll)
+		list_add_tail(&n->poll_list, repoll);
+
+	netpoll_poll_unlock(have);
+
+	return work;
+}
+
+// net/core/dev.c
+static int __napi_poll(struct napi_struct *n, bool *repoll)
+{
+	int work, weight;
+
+	weight = n->weight;
+
+	/* This NAPI_STATE_SCHED test is for avoiding a race
+	 * with netpoll's poll_napi().  Only the entity which
+	 * obtains the lock and sees NAPI_STATE_SCHED set will
+	 * actually make the ->poll() call.  Therefore we avoid
+	 * accidentally calling ->poll() when NAPI is not scheduled.
+	 */
+	work = 0;
+	if (test_bit(NAPI_STATE_SCHED, &n->state)) {
+		work = n->poll(n, weight);
+		trace_napi_poll(n, work, weight);
+	}
+
+	if (unlikely(work > weight))
+		netdev_err_once(n->dev, "NAPI poll function %pS returned %d, exceeding its budget of %d.\n",
+				n->poll, work, weight);
+
+	if (likely(work < weight))
+		return work;
+
+	/* Drivers must not modify the NAPI state if they
+	 * consume the entire weight.  In such cases this code
+	 * still "owns" the NAPI instance and therefore can
+	 * move the instance around on the list at-will.
+	 */
+	if (unlikely(napi_disable_pending(n))) {
+		napi_complete(n);
+		return work;
+	}
+
+	/* The NAPI context has more processing work, but busy-polling
+	 * is preferred. Exit early.
+	 */
+	if (napi_prefer_busy_poll(n)) {
+		if (napi_complete_done(n, work)) {
+			/* If timeout is not set, we need to make sure
+			 * that the NAPI is re-scheduled.
+			 */
+			napi_schedule(n);
+		}
+		return work;
+	}
+
+	if (n->gro_bitmask) {
+		/* flush too old packets
+		 * If HZ < 1000, flush all packets.
+		 */
+		napi_gro_flush(n, HZ >= 1000);
+	}
+
+	gro_normal_list(n);
+
+	/* Some drivers may have called napi_schedule
+	 * prior to exhausting their budget.
+	 */
+	if (unlikely(!list_empty(&n->poll_list))) {
+		pr_warn_once("%s: Budget exhausted after napi rescheduled\n",
+			     n->dev ? n->dev->name : "backlog");
+		return work;
+	}
+
+	*repoll = true;
+
+	return work;
+}
+```
+
+- 上面调用poll函数后，就到驱动里面处理，驱动里面会调用到`napi_gro_receive`
+
+```cpp
+// net/core/gro.c
+gro_result_t napi_gro_receive(struct napi_struct *napi, struct sk_buff *skb)
+{
+	gro_result_t ret;
+
+	skb_mark_napi_id(skb, napi);
+	trace_napi_gro_receive_entry(skb);
+
+	skb_gro_reset_offset(skb, 0);
+
+	ret = napi_skb_finish(napi, skb, dev_gro_receive(napi, skb));
+	trace_napi_gro_receive_exit(ret);
+
+	return ret;
+}
+EXPORT_SYMBOL(napi_gro_receive);
+```
+
+- 调用到`napi_skb_finish`，转`netif_receive_skb`
+
+```cpp
+// net/core/gro.c
+static gro_result_t napi_skb_finish(struct napi_struct *napi,
+				    struct sk_buff *skb,
+				    gro_result_t ret)
+{
+	switch (ret) {
+	case GRO_NORMAL:
+		gro_normal_one(napi, skb, 1);
+		break;
+
+	case GRO_MERGED_FREE:
+		if (NAPI_GRO_CB(skb)->free == NAPI_GRO_FREE_STOLEN_HEAD)
+			napi_skb_free_stolen_head(skb);
+		else if (skb->fclone != SKB_FCLONE_UNAVAILABLE)
+			__kfree_skb(skb);
+		else
+			__kfree_skb_defer(skb);
+		break;
+
+	case GRO_HELD:
+	case GRO_MERGED:
+	case GRO_CONSUMED:
+		break;
+	}
+
+	return ret;
+}
+
+// include/net/gro.h
+/* Queue one GRO_NORMAL SKB up for list processing. If batch size exceeded,
+ * pass the whole batch up to the stack.
+ */
+static inline void gro_normal_one(struct napi_struct *napi, struct sk_buff *skb, int segs)
+{
+	list_add_tail(&skb->list, &napi->rx_list);
+	napi->rx_count += segs;
+	if (napi->rx_count >= gro_normal_batch)
+		gro_normal_list(napi);
+}
+
+// include/net/gro.h
+/* Pass the currently batched GRO_NORMAL SKBs up to the stack. */
+static inline void gro_normal_list(struct napi_struct *napi)
+{
+	if (!napi->rx_count)
+		return;
+	netif_receive_skb_list_internal(&napi->rx_list);
+	INIT_LIST_HEAD(&napi->rx_list);
+	napi->rx_count = 0;
+}
+
+// net/core/dev.c
+void netif_receive_skb_list_internal(struct list_head *head)
+{
+	struct sk_buff *skb, *next;
+	struct list_head sublist;
+
+	INIT_LIST_HEAD(&sublist);
+	list_for_each_entry_safe(skb, next, head, list) {
+		net_timestamp_check(netdev_tstamp_prequeue, skb);
+		skb_list_del_init(skb);
+		if (!skb_defer_rx_timestamp(skb))
+			list_add_tail(&skb->list, &sublist);
+	}
+	list_splice_init(&sublist, head);
+
+	rcu_read_lock();
+#ifdef CONFIG_RPS
+	if (static_branch_unlikely(&rps_needed)) {
+		list_for_each_entry_safe(skb, next, head, list) {
+			struct rps_dev_flow voidflow, *rflow = &voidflow;
+			int cpu = get_rps_cpu(skb->dev, skb, &rflow);
+
+			if (cpu >= 0) {
+				/* Will be handled, remove from list */
+				skb_list_del_init(skb);
+				enqueue_to_backlog(skb, cpu, &rflow->last_qtail);
+			}
+		}
+	}
+#endif
+	__netif_receive_skb_list(head);
+	rcu_read_unlock();
+}
+
+// net/core/dev.c
+static void __netif_receive_skb_list(struct list_head *head)
+{
+	unsigned long noreclaim_flag = 0;
+	struct sk_buff *skb, *next;
+	bool pfmemalloc = false; /* Is current sublist PF_MEMALLOC? */
+
+	list_for_each_entry_safe(skb, next, head, list) {
+		if ((sk_memalloc_socks() && skb_pfmemalloc(skb)) != pfmemalloc) {
+			struct list_head sublist;
+
+			/* Handle the previous sublist */
+			list_cut_before(&sublist, head, &skb->list);
+			if (!list_empty(&sublist))
+				__netif_receive_skb_list_core(&sublist, pfmemalloc);
+			pfmemalloc = !pfmemalloc;
+			/* See comments in __netif_receive_skb */
+			if (pfmemalloc)
+				noreclaim_flag = memalloc_noreclaim_save();
+			else
+				memalloc_noreclaim_restore(noreclaim_flag);
+		}
+	}
+	/* Handle the remaining sublist */
+	if (!list_empty(head))
+		__netif_receive_skb_list_core(head, pfmemalloc);
+	/* Restore pflags */
+	if (pfmemalloc)
+		memalloc_noreclaim_restore(noreclaim_flag);
+}
+
+// net/core/dev.c
+static void __netif_receive_skb_list_core(struct list_head *head, bool pfmemalloc)
+{
+	/* Fast-path assumptions:
+	 * - There is no RX handler.
+	 * - Only one packet_type matches.
+	 * If either of these fails, we will end up doing some per-packet
+	 * processing in-line, then handling the 'last ptype' for the whole
+	 * sublist.  This can't cause out-of-order delivery to any single ptype,
+	 * because the 'last ptype' must be constant across the sublist, and all
+	 * other ptypes are handled per-packet.
+	 */
+	/* Current (common) ptype of sublist */
+	struct packet_type *pt_curr = NULL;
+	/* Current (common) orig_dev of sublist */
+	struct net_device *od_curr = NULL;
+	struct list_head sublist;
+	struct sk_buff *skb, *next;
+
+	INIT_LIST_HEAD(&sublist);
+	list_for_each_entry_safe(skb, next, head, list) {
+		struct net_device *orig_dev = skb->dev;
+		struct packet_type *pt_prev = NULL;
+
+		skb_list_del_init(skb);
+		__netif_receive_skb_core(&skb, pfmemalloc, &pt_prev);
+		if (!pt_prev)
+			continue;
+		if (pt_curr != pt_prev || od_curr != orig_dev) {
+			/* dispatch old sublist */
+			__netif_receive_skb_list_ptype(&sublist, pt_curr, od_curr);
+			/* start new sublist */
+			INIT_LIST_HEAD(&sublist);
+			pt_curr = pt_prev;
+			od_curr = orig_dev;
+		}
+		list_add_tail(&skb->list, &sublist);
+	}
+
+	/* dispatch final sublist */
+	__netif_receive_skb_list_ptype(&sublist, pt_curr, od_curr);
+}
+```
+
+- `netif_receive_skb_core`里面处理包，并添加了trace入口，可以从这个函数进行追踪
+- tcpdump抓包同样也在这里挂载了虚拟协议
+
+```cpp
+static int __netif_receive_skb_core(struct sk_buff **pskb, bool pfmemalloc,
+				    struct packet_type **ppt_prev)
+{
+	struct packet_type *ptype, *pt_prev;
+	rx_handler_func_t *rx_handler;
+	struct sk_buff *skb = *pskb;
+	struct net_device *orig_dev;
+	bool deliver_exact = false;
+	int ret = NET_RX_DROP;
+	__be16 type;
+
+	net_timestamp_check(!netdev_tstamp_prequeue, skb);
+
+	// 这里插入的tracepoint
+	trace_netif_receive_skb(skb);
+
+	orig_dev = skb->dev;
+
+	skb_reset_network_header(skb);
+	if (!skb_transport_header_was_set(skb))
+		skb_reset_transport_header(skb);
+	skb_reset_mac_len(skb);
+
+	pt_prev = NULL;
+
+another_round:
+	skb->skb_iif = skb->dev->ifindex;
+
+	__this_cpu_inc(softnet_data.processed);
+
+	if (static_branch_unlikely(&generic_xdp_needed_key)) {
+		int ret2;
+
+		migrate_disable();
+		ret2 = do_xdp_generic(rcu_dereference(skb->dev->xdp_prog), skb);
+		migrate_enable();
+
+		if (ret2 != XDP_PASS) {
+			ret = NET_RX_DROP;
+			goto out;
+		}
+	}
+
+	if (eth_type_vlan(skb->protocol)) {
+		skb = skb_vlan_untag(skb);
+		if (unlikely(!skb))
+			goto out;
+	}
+
+	if (skb_skip_tc_classify(skb))
+		goto skip_classify;
+
+	if (pfmemalloc)
+		goto skip_taps;
+
+	// 这一步是tcpdump的抓包入口，tcpdump在这里挂了虚拟协议
+	list_for_each_entry_rcu(ptype, &ptype_all, list) {
+		if (pt_prev)
+			ret = deliver_skb(skb, pt_prev, orig_dev);
+		pt_prev = ptype;
+	}
+
+	list_for_each_entry_rcu(ptype, &skb->dev->ptype_all, list) {
+		if (pt_prev)
+			ret = deliver_skb(skb, pt_prev, orig_dev);
+		pt_prev = ptype;
+	}
+	...
+}
+```
+
+- `deliver_skb`就会调用注册的func函数
+
+```cpp
+// net/core/dev.c
+static inline int deliver_skb(struct sk_buff *skb,
+			      struct packet_type *pt_prev,
+			      struct net_device *orig_dev)
+{
+	if (unlikely(skb_orphan_frags_rx(skb, GFP_ATOMIC)))
+		return -ENOMEM;
+	refcount_inc(&skb->users);
+	return pt_prev->func(skb, skb->dev, pt_prev, orig_dev);
+}
+```
+
+- 注册函数是下面的
+
+```cpp
+// net/core/dev.c
+/**
+ *	dev_add_pack - add packet handler
+ *	@pt: packet type declaration
+ *
+ *	Add a protocol handler to the networking stack. The passed &packet_type
+ *	is linked into kernel lists and may not be freed until it has been
+ *	removed from the kernel lists.
+ *
+ *	This call does not sleep therefore it can not
+ *	guarantee all CPU's that are in middle of receiving packets
+ *	will see the new packet type (until the next received packet).
+ */
+
+void dev_add_pack(struct packet_type *pt)
+{
+	struct list_head *head = ptype_head(pt);
+
+	spin_lock(&ptype_lock);
+	list_add_rcu(&pt->list, head);
+	spin_unlock(&ptype_lock);
+}
+EXPORT_SYMBOL(dev_add_pack);
 ```

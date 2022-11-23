@@ -1,3 +1,7 @@
+---
+title: "std::shared_ptr"
+---
+
 # 一、`shared_ptr(_Yp* __p)`分析
 
 ## 1. 初始化
