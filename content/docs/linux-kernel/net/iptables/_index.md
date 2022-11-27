@@ -8,46 +8,7 @@ weight: 3
 
 ## 1. 规则链图
 
-```plantuml
-@startuml
-title 规则链生效时机
-node "用户空间" {
-    [Application] #Yellow
-}
-node "内核空间" {
-    [INPUT]
-    [OUTPUT]
-    [POSTROUTING]
-    [PREROUTING]
-    [FORWARD]
-    [入站路由] #Yellow
-note left of "入站路由"
-判断是否在本地有监听地址
-end note
-    [出站路由] #Yellow
-note right of "出站路由"
-出站路由会选择下一跳
-也就是会选择网卡
-end note
-}
-node "网络" {
-    [网卡1]
-    [网卡2]
-    [网卡3]
-}
-[网卡1] -up-> [PREROUTING]
-[PREROUTING] -up-> [入站路由]
-[入站路由] -right-> [FORWARD]: 非本机流量
-[入站路由] -up-> [INPUT]: 本机流量
-[INPUT] -up-> [Application]
-[Application] -down-> [OUTPUT]
-[OUTPUT] -down-> [出站路由]
-[FORWARD] -right-> [出站路由]
-[出站路由] -down-> [POSTROUTING]
-[POSTROUTING] -down-> [网卡2]
-
-@enduml
-```
+![](../imgs/2022-09-23-02.png)
 
 ## 2. 每个表对应的链
 
@@ -57,14 +18,14 @@ node "网络" {
 | ------ | -------------------------- | ---------- | ----- | ------- | ------ | ----------- |
 | raw    | 确定是否跟踪数据包状态     | 1          |       |         | 1      |             |
 | mangle | 修改数据包内容，如设置标记 | 1          | 1     | 1       | 1      | 1           |
-| nat    | 网络地址转换               | 1          |       |         | 1      | 1           |
+| nat    | 网络地址转换               | 1          | 1     |         | 1      | 1           |
 | filter | 数据包是否放行             |            | 1     | 1       | 1      |             |
 
 ## 3. 规则匹配顺序
 
-- 下图仅看规则匹配顺序即可，出站路由选择是错的，实际应该先经过OUTPUT链再进行路由选择
-
 <img src="../imgs/2022-09-06-01.png" />
+
+- 路由选择确实是在OUTPUT链前面，但是如果OUTPUT链里面做了nat或设置了mark，在netfilter里面会重新走一遍路由
 
 ## 4. 常用控制类型
 
@@ -75,9 +36,11 @@ node "网络" {
 - `DNAT`: 修改数据包的目的地址
 - `MASQUERADE`: 伪装成一个非固定公网IP地址
 - `LOG`: 在`/var/log/messages`文件中记录日志信息，然后将数据包传递给下一条规则。LOG只是一种辅助动作，并没有真正处理数据包
+  - 当前测试只能在filter表上才能加LOG，其他表加LOG没生效
 
 ## 5. 常用的管理选项
 
+- `-t`: 指定表，也就是raw、mangle、nat、filter，不指定默认是filter
 - `-A`: 在指定链的末尾追加(--append) 一条新的规则
 - `-I`: 在指定链的开头插入(--insert)一条新的规则，未指定序号时默认作为第一条规则
 - `-R`: 修改、替换(--replace) 指定链中的某一条规则，可指定规则序号或具体内容
