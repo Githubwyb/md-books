@@ -1,34 +1,39 @@
 ---
-weight: 2446
-title: "2446. Determine if Two Events Have Conflict"
+weight: 2487
+title: "2487. Remove Nodes From Linked List"
 ---
 
 # 题目
 
-给你一个链表的头节点 head 。
+You are given the head of a linked list.
 
-对于列表中的每个节点 node ，如果其右侧存在一个具有 严格更大 值的节点，则移除 node 。
+Remove every node which has a node with a strictly greater value anywhere to the right side of it.
 
-返回修改后链表的头节点 head 。
+Return the head of the modified linked list.
 
-示例 1：
+Example 1:
 
-输入：head = [5,2,13,3,8]
-输出：[13,8]
-解释：需要移除的节点是 5 ，2 和 3 。
-- 节点 13 在节点 5 右侧。
-- 节点 13 在节点 2 右侧。
-- 节点 8 在节点 3 右侧。
-示例 2：
+```
+Input: head = [5,2,13,3,8]
+Output: [13,8]
+Explanation: The nodes that should be removed are 5, 2 and 3.
+- Node 13 is to the right of node 5.
+- Node 13 is to the right of node 2.
+- Node 8 is to the right of node 3.
+```
 
-输入：head = [1,1,1,1]
-输出：[1,1,1,1]
-解释：每个节点的值都是 1 ，所以没有需要移除的节点。
+Example 2:
 
-提示：
+```
+Input: head = [1,1,1,1]
+Output: [1,1,1,1]
+Explanation: Every node has value 1, so no nodes are removed.
+```
 
-给定列表中的节点数目在范围 [1, 105] 内
-1 <= Node.val <= 105
+Constraints:
+
+- The number of the nodes in the given list is in the range $[1, 10^5]$.
+- $1 <= Node.val <= 10^5$
 
 # 思路1 反向最大值遍历
 

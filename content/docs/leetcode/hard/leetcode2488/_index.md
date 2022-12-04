@@ -1,39 +1,42 @@
 ---
-weight: 2446
-title: "6248. 统计中位数为 K 的子数组"
+weight: 2488
+title: "2488. Count Subarrays With Median K"
 ---
 
 # 题目
 
-给你一个长度为 n 的数组 nums ，该数组由从 1 到 n 的 不同 整数组成。另给你一个正整数 k 。
+You are given an array nums of size n consisting of distinct integers from 1 to n and a positive integer k.
 
-统计并返回 num 中的 中位数 等于 k 的非空子数组的数目。
+Return the number of non-empty subarrays in nums that have a median equal to k.
 
-注意：
+Note:
 
-数组的中位数是按 递增 顺序排列后位于 中间 的那个元素，如果数组长度为偶数，则中位数是位于中间靠 左 的那个元素。
-例如，[2,3,1,4] 的中位数是 2 ，[8,4,3,5,1] 的中位数是 4 。
-子数组是数组中的一个连续部分。
+- The median of an array is the middle element after sorting the array in ascending order. If the array is of even length, the median is the left middle element.
+	- For example, the median of [2,3,1,4] is 2, and the median of [8,4,3,5,1] is 4.
+- A subarray is a contiguous part of an array.
 
+Example 1:
 
-示例 1：
+```
+Input: nums = [3,2,1,4,5], k = 4
+Output: 3
+Explanation: The subarrays that have a median equal to 4 are: [4], [4,5] and [1,4,5].
+```
 
-输入：nums = [3,2,1,4,5], k = 4
-输出：3
-解释：中位数等于 4 的子数组有：[4]、[4,5] 和 [1,4,5] 。
-示例 2：
+Example 2:
 
-输入：nums = [2,3,1], k = 3
-输出：1
-解释：[3] 是唯一一个中位数等于 3 的子数组。
+```
+Input: nums = [2,3,1], k = 3
+Output: 1
+Explanation: [3] is the only subarray that has a median equal to 3.
+```
 
+Constraints:
 
-提示：
-
-n == nums.length
-1 <= n <= 105
-1 <= nums[i], k <= n
-nums 中的整数互不相同
+- n == nums.length
+- $1 <= n <= 10^5$
+- 1 <= nums[i], k <= n
+- The integers in nums are distinct.
 
 # 思路1 统计一边大于或小于等于，然后计算另一边
 
