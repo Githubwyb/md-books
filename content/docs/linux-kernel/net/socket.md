@@ -183,3 +183,39 @@ struct file *sock_alloc_file(struct socket *sock, int flags, const char *dname) 
 }
 EXPORT_SYMBOL(sock_alloc_file);
 ```
+
+# 三、socket唤醒操作
+
+- init时注册data_ready函数
+
+```cpp
+// net/core/sock.c
+void sock_init_data(struct socket *sock, struct sock *sk)
+{
+    ...
+	sk->sk_state_change	=	sock_def_wakeup;
+	sk->sk_data_ready	=	sock_def_readable;      // 注册可读函数，当有数据时调用
+	sk->sk_write_space	=	sock_def_write_space;
+	sk->sk_error_report	=	sock_def_error_report;
+	sk->sk_destruct		=	sock_def_destruct;
+    ...
+}
+EXPORT_SYMBOL(sock_init_data);
+
+// net/core/sock.c
+void sock_def_readable(struct sock *sk)
+{
+	struct socket_wq *wq;
+
+	rcu_read_lock();
+	wq = rcu_dereference(sk->sk_wq);
+    // 唤醒队列上的线程
+	if (skwq_has_sleeper(wq))
+		wake_up_interruptible_sync_poll(&wq->wait, EPOLLIN | EPOLLPRI |
+						EPOLLRDNORM | EPOLLRDBAND);
+	sk_wake_async(sk, SOCK_WAKE_WAITD, POLL_IN);
+	rcu_read_unlock();
+}
+```
+
+- 各自协议内部有数据后进行调用

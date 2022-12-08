@@ -290,6 +290,517 @@ int inet_del_protocol(const struct net_protocol *prot, unsigned char protocol);
 EXPORT_SYMBOL(inet_del_protocol);
 ```
 
+## 2. 路由处理
+
+- 上面讲了通过`ip_rcv_finish_core`来处理路由
+
+```cpp
+// net/ipv4/ip_input.c
+static int ip_rcv_finish_core(struct net *net, struct sock *sk,
+			      struct sk_buff *skb, struct net_device *dev,
+			      const struct sk_buff *hint)
+{
+	const struct iphdr *iph = ip_hdr(skb);
+	int err, drop_reason;
+	struct rtable *rt;
+
+	drop_reason = SKB_DROP_REASON_NOT_SPECIFIED;
+
+	if (ip_can_use_hint(skb, iph, hint)) {
+		err = ip_route_use_hint(skb, iph->daddr, iph->saddr, iph->tos,
+					dev, hint);
+		if (unlikely(err))
+			goto drop_error;
+	}
+
+	if (READ_ONCE(net->ipv4.sysctl_ip_early_demux) &&
+	    !skb_dst(skb) &&
+	    !skb->sk &&
+	    !ip_is_fragment(iph)) {
+		switch (iph->protocol) {
+		case IPPROTO_TCP:
+			if (READ_ONCE(net->ipv4.sysctl_tcp_early_demux)) {
+				tcp_v4_early_demux(skb);
+
+				/* must reload iph, skb->head might have changed */
+				iph = ip_hdr(skb);
+			}
+			break;
+		case IPPROTO_UDP:
+			if (READ_ONCE(net->ipv4.sysctl_udp_early_demux)) {
+				err = udp_v4_early_demux(skb);
+				if (unlikely(err))
+					goto drop_error;
+
+				/* must reload iph, skb->head might have changed */
+				iph = ip_hdr(skb);
+			}
+			break;
+		}
+	}
+
+	/*
+	 *	Initialise the virtual path cache for the packet. It describes
+	 *	how the packet travels inside Linux networking.
+	 */
+	if (!skb_valid_dst(skb)) {
+        // 处理路由
+		err = ip_route_input_noref(skb, iph->daddr, iph->saddr,
+					   iph->tos, dev);
+		if (unlikely(err))
+			goto drop_error;
+	}
+    ...
+
+drop:
+	kfree_skb_reason(skb, drop_reason);
+	return NET_RX_DROP;
+
+drop_error:
+	if (err == -EXDEV) {
+		drop_reason = SKB_DROP_REASON_IP_RPFILTER;
+		__NET_INC_STATS(net, LINUX_MIB_IPRPFILTER);
+	}
+	goto drop;
+}
+```
+
+### 2.1. `rp_filter`如何生效
+
+- `ip_route_input_noref`处理路由
+
+```cpp
+// net/ipv4/route.c
+int ip_route_input_noref(struct sk_buff *skb, __be32 daddr, __be32 saddr,
+			 u8 tos, struct net_device *dev)
+{
+	struct fib_result res;
+	int err;
+
+	tos &= IPTOS_RT_MASK;
+	rcu_read_lock();
+	err = ip_route_input_rcu(skb, daddr, saddr, tos, dev, &res);
+	rcu_read_unlock();
+
+	return err;
+}
+EXPORT_SYMBOL(ip_route_input_noref);
+
+// net/ipv4/route.c
+/* called with rcu_read_lock held */
+int ip_route_input_rcu(struct sk_buff *skb, __be32 daddr, __be32 saddr,
+		       u8 tos, struct net_device *dev, struct fib_result *res)
+{
+	/* Multicast recognition logic is moved from route cache to here.
+	 * The problem was that too many Ethernet cards have broken/missing
+	 * hardware multicast filters :-( As result the host on multicasting
+	 * network acquires a lot of useless route cache entries, sort of
+	 * SDR messages from all the world. Now we try to get rid of them.
+	 * Really, provided software IP multicast filter is organized
+	 * reasonably (at least, hashed), it does not result in a slowdown
+	 * comparing with route cache reject entries.
+	 * Note, that multicast routers are not affected, because
+	 * route cache entry is created eventually.
+	 */
+    // 多播地址处理
+	if (ipv4_is_multicast(daddr)) {
+        ...
+        return err;
+	}
+
+    // 单播处理
+	return ip_route_input_slow(skb, daddr, saddr, tos, dev, res);
+}
+```
+
+- `ip_route_input_slow`处理单播包
+
+```cpp
+// net/ipv4/route.c
+/*
+ *	NOTE. We drop all the packets that has local source
+ *	addresses, because every properly looped back packet
+ *	must have correct destination already attached by output routine.
+ *	Changes in the enforced policies must be applied also to
+ *	ip_route_use_hint().
+ *
+ *	Such approach solves two big problems:
+ *	1. Not simplex devices are handled properly.
+ *	2. IP spoofing attempts are filtered with 100% of guarantee.
+ *	called with rcu_read_lock()
+ */
+
+static int ip_route_input_slow(struct sk_buff *skb, __be32 daddr, __be32 saddr,
+			       u8 tos, struct net_device *dev,
+			       struct fib_result *res)
+{
+	struct in_device *in_dev = __in_dev_get_rcu(dev);
+	struct flow_keys *flkeys = NULL, _flkeys;
+	struct net    *net = dev_net(dev);
+	struct ip_tunnel_info *tun_info;
+	int		err = -EINVAL;
+	unsigned int	flags = 0;
+	u32		itag = 0;
+	struct rtable	*rth;
+	struct flowi4	fl4;
+	bool do_cache = true;
+	bool no_policy;
+
+	/* IP on this device is disabled. */
+
+	if (!in_dev)
+		goto out;
+
+	/* Check for the most weird martians, which can be not detected
+	 * by fib_lookup.
+	 */
+
+	tun_info = skb_tunnel_info(skb);
+	if (tun_info && !(tun_info->mode & IP_TUNNEL_INFO_TX))
+		fl4.flowi4_tun_key.tun_id = tun_info->key.tun_id;
+	else
+		fl4.flowi4_tun_key.tun_id = 0;
+	skb_dst_drop(skb);
+
+	if (ipv4_is_multicast(saddr) || ipv4_is_lbcast(saddr))
+		goto martian_source;
+
+	res->fi = NULL;
+	res->table = NULL;
+	if (ipv4_is_lbcast(daddr) || (saddr == 0 && daddr == 0))
+		goto brd_input;
+
+	/* Accept zero addresses only to limited broadcast;
+	 * I even do not know to fix it or not. Waiting for complains :-)
+	 */
+	if (ipv4_is_zeronet(saddr))
+		goto martian_source;
+
+	if (ipv4_is_zeronet(daddr))
+		goto martian_destination;
+
+	/* Following code try to avoid calling IN_DEV_NET_ROUTE_LOCALNET(),
+	 * and call it once if daddr or/and saddr are loopback addresses
+	 */
+	if (ipv4_is_loopback(daddr)) {
+		if (!IN_DEV_NET_ROUTE_LOCALNET(in_dev, net))
+			goto martian_destination;
+	} else if (ipv4_is_loopback(saddr)) {
+		if (!IN_DEV_NET_ROUTE_LOCALNET(in_dev, net))
+			goto martian_source;
+	}
+
+	/*
+	 *	Now we are ready to route packet.
+	 */
+	fl4.flowi4_l3mdev = 0;
+	fl4.flowi4_oif = 0;
+	fl4.flowi4_iif = dev->ifindex;
+	fl4.flowi4_mark = skb->mark;
+	fl4.flowi4_tos = tos;
+	fl4.flowi4_scope = RT_SCOPE_UNIVERSE;
+	fl4.flowi4_flags = 0;
+	fl4.daddr = daddr;
+	fl4.saddr = saddr;
+	fl4.flowi4_uid = sock_net_uid(net, NULL);
+	fl4.flowi4_multipath_hash = 0;
+
+	if (fib4_rules_early_flow_dissect(net, skb, &fl4, &_flkeys)) {
+		flkeys = &_flkeys;
+	} else {
+		fl4.flowi4_proto = 0;
+		fl4.fl4_sport = 0;
+		fl4.fl4_dport = 0;
+	}
+
+	err = fib_lookup(net, &fl4, res, 0);
+	if (err != 0) {
+		if (!IN_DEV_FORWARD(in_dev))
+			err = -EHOSTUNREACH;
+		goto no_route;
+	}
+
+	if (res->type == RTN_BROADCAST) {
+		if (IN_DEV_BFORWARD(in_dev))
+			goto make_route;
+		/* not do cache if bc_forwarding is enabled */
+		if (IPV4_DEVCONF_ALL(net, BC_FORWARDING))
+			do_cache = false;
+		goto brd_input;
+	}
+
+	if (res->type == RTN_LOCAL) {
+		err = fib_validate_source(skb, saddr, daddr, tos,
+					  0, dev, in_dev, &itag);
+		if (err < 0)
+			goto martian_source;
+		goto local_input;
+	}
+
+	if (!IN_DEV_FORWARD(in_dev)) {
+		err = -EHOSTUNREACH;
+		goto no_route;
+	}
+	if (res->type != RTN_UNICAST)
+		goto martian_destination;
+
+make_route:
+    // 正常包上面流程走完了会到这里
+	err = ip_mkroute_input(skb, res, in_dev, daddr, saddr, tos, flkeys);
+out:	return err;
+    ...
+}
+```
+
+- `ip_mkroute_input`
+
+```cpp
+// net/ipv4/route.c
+static int ip_mkroute_input(struct sk_buff *skb,
+			    struct fib_result *res,
+			    struct in_device *in_dev,
+			    __be32 daddr, __be32 saddr, u32 tos,
+			    struct flow_keys *hkeys)
+{
+#ifdef CONFIG_IP_ROUTE_MULTIPATH
+	if (res->fi && fib_info_num_path(res->fi) > 1) {
+		int h = fib_multipath_hash(res->fi->fib_net, NULL, skb, hkeys);
+
+		fib_select_multipath(res, h);
+	}
+#endif
+
+	/* create a routing cache entry */
+	return __mkroute_input(skb, res, in_dev, daddr, saddr, tos);
+}
+
+// net/ipv4/route.c
+/* called in rcu_read_lock() section */
+static int __mkroute_input(struct sk_buff *skb,
+			   const struct fib_result *res,
+			   struct in_device *in_dev,
+			   __be32 daddr, __be32 saddr, u32 tos)
+{
+	struct fib_nh_common *nhc = FIB_RES_NHC(*res);
+	struct net_device *dev = nhc->nhc_dev;
+	struct fib_nh_exception *fnhe;
+	struct rtable *rth;
+	int err;
+	struct in_device *out_dev;
+	bool do_cache, no_policy;
+	u32 itag = 0;
+
+	/* get a working reference to the output device */
+	out_dev = __in_dev_get_rcu(dev);
+	if (!out_dev) {
+		net_crit_ratelimited("Bug in ip_route_input_slow(). Please report.\n");
+		return -EINVAL;
+	}
+
+    // 校验源地址是否正确
+	err = fib_validate_source(skb, saddr, daddr, tos, FIB_RES_OIF(*res),
+				  in_dev->dev, in_dev, &itag);
+	if (err < 0) {
+		ip_handle_martian_source(in_dev->dev, in_dev, skb, daddr,
+					 saddr);
+
+		goto cleanup;
+	}
+
+	do_cache = res->fi && !itag;
+	if (out_dev == in_dev && err && IN_DEV_TX_REDIRECTS(out_dev) &&
+	    skb->protocol == htons(ETH_P_IP)) {
+		__be32 gw;
+
+		gw = nhc->nhc_gw_family == AF_INET ? nhc->nhc_gw.ipv4 : 0;
+		if (IN_DEV_SHARED_MEDIA(out_dev) ||
+		    inet_addr_onlink(out_dev, saddr, gw))
+			IPCB(skb)->flags |= IPSKB_DOREDIRECT;
+	}
+
+	if (skb->protocol != htons(ETH_P_IP)) {
+		/* Not IP (i.e. ARP). Do not create route, if it is
+		 * invalid for proxy arp. DNAT routes are always valid.
+		 *
+		 * Proxy arp feature have been extended to allow, ARP
+		 * replies back to the same interface, to support
+		 * Private VLAN switch technologies. See arp.c.
+		 */
+		if (out_dev == in_dev &&
+		    IN_DEV_PROXY_ARP_PVLAN(in_dev) == 0) {
+			err = -EINVAL;
+			goto cleanup;
+		}
+	}
+
+	no_policy = IN_DEV_ORCONF(in_dev, NOPOLICY);
+	if (no_policy)
+		IPCB(skb)->flags |= IPSKB_NOPOLICY;
+
+	fnhe = find_exception(nhc, daddr);
+	if (do_cache) {
+		if (fnhe)
+			rth = rcu_dereference(fnhe->fnhe_rth_input);
+		else
+			rth = rcu_dereference(nhc->nhc_rth_input);
+		if (rt_cache_valid(rth)) {
+			skb_dst_set_noref(skb, &rth->dst);
+			goto out;
+		}
+	}
+
+	rth = rt_dst_alloc(out_dev->dev, 0, res->type, no_policy,
+			   IN_DEV_ORCONF(out_dev, NOXFRM));
+	if (!rth) {
+		err = -ENOBUFS;
+		goto cleanup;
+	}
+
+	rth->rt_is_input = 1;
+	RT_CACHE_STAT_INC(in_slow_tot);
+
+	rth->dst.input = ip_forward;
+
+	rt_set_nexthop(rth, daddr, res, fnhe, res->fi, res->type, itag,
+		       do_cache);
+	lwtunnel_set_redirect(&rth->dst);
+	skb_dst_set(skb, &rth->dst);
+out:
+	err = 0;
+ cleanup:
+	return err;
+}
+```
+
+- `fib_validate_source`校验源地址是否正确
+- 这里会判断`rp_filter`选项，如果为1，根据对应的源地址目的地址反向查找路由，对应的网卡如果不匹配就进行丢包
+
+```cpp
+// net/ipv4/fib_frontend.c
+/* Ignore rp_filter for packets protected by IPsec. */
+int fib_validate_source(struct sk_buff *skb, __be32 src, __be32 dst,
+			u8 tos, int oif, struct net_device *dev,
+			struct in_device *idev, u32 *itag)
+{
+    // r就是对应网卡的rp_filter选项，使用sysctl -a | grep -i \.rp_filter可以看到
+    // net.ipv4.conf.wlp0s20f0u1u2.rp_filter = 2
+	int r = secpath_exists(skb) ? 0 : IN_DEV_RPFILTER(idev);
+	struct net *net = dev_net(dev);
+
+	if (!r && !fib_num_tclassid_users(net) &&
+	    (dev->ifindex != oif || !IN_DEV_TX_REDIRECTS(idev))) {
+		if (IN_DEV_ACCEPT_LOCAL(idev))
+			goto ok;
+		/* with custom local routes in place, checking local addresses
+		 * only will be too optimistic, with custom rules, checking
+		 * local addresses only can be too strict, e.g. due to vrf
+		 */
+		if (net->ipv4.fib_has_custom_local_routes ||
+		    fib4_has_custom_rules(net))
+			goto full_check;
+		/* Within the same container, it is regarded as a martian source,
+		 * and the same host but different containers are not.
+		 */
+		if (inet_lookup_ifaddr_rcu(net, src))
+			return -EINVAL;
+
+ok:
+		*itag = 0;
+		return 0;
+	}
+
+full_check:
+	return __fib_validate_source(skb, src, dst, tos, oif, dev, r, idev, itag);
+}
+
+// net/ipv4/fib_frontend.c
+/* Given (packet source, input interface) and optional (dst, oif, tos):
+ * - (main) check, that source is valid i.e. not broadcast or our local
+ *   address.
+ * - figure out what "logical" interface this packet arrived
+ *   and calculate "specific destination" address.
+ * - check, that packet arrived from expected physical interface.
+ * called with rcu_read_lock()
+ */
+static int __fib_validate_source(struct sk_buff *skb, __be32 src, __be32 dst,
+				 u8 tos, int oif, struct net_device *dev,
+				 int rpf, struct in_device *idev, u32 *itag)
+{
+	struct net *net = dev_net(dev);
+	struct flow_keys flkeys;
+	int ret, no_addr;
+	struct fib_result res;
+	struct flowi4 fl4;
+	bool dev_match;
+
+	fl4.flowi4_oif = 0;
+	fl4.flowi4_l3mdev = l3mdev_master_ifindex_rcu(dev);
+	fl4.flowi4_iif = oif ? : LOOPBACK_IFINDEX;
+	fl4.daddr = src;
+	fl4.saddr = dst;
+	fl4.flowi4_tos = tos;
+	fl4.flowi4_scope = RT_SCOPE_UNIVERSE;
+	fl4.flowi4_tun_key.tun_id = 0;
+	fl4.flowi4_flags = 0;
+	fl4.flowi4_uid = sock_net_uid(net, NULL);
+	fl4.flowi4_multipath_hash = 0;
+
+	no_addr = idev->ifa_list == NULL;
+
+	fl4.flowi4_mark = IN_DEV_SRC_VMARK(idev) ? skb->mark : 0;
+	if (!fib4_rules_early_flow_dissect(net, skb, &fl4, &flkeys)) {
+		fl4.flowi4_proto = 0;
+		fl4.fl4_sport = 0;
+		fl4.fl4_dport = 0;
+	} else {
+		swap(fl4.fl4_sport, fl4.fl4_dport);
+	}
+
+	if (fib_lookup(net, &fl4, &res, 0))
+		goto last_resort;
+	if (res.type != RTN_UNICAST &&
+	    (res.type != RTN_LOCAL || !IN_DEV_ACCEPT_LOCAL(idev)))
+		goto e_inval;
+	fib_combine_itag(itag, &res);
+
+	dev_match = fib_info_nh_uses_dev(res.fi, dev);
+	/* This is not common, loopback packets retain skb_dst so normally they
+	 * would not even hit this slow path.
+	 */
+    // 看网卡是否对应上，如果对应不上走后面流程
+	dev_match = dev_match || (res.type == RTN_LOCAL &&
+				  dev == net->loopback_dev);
+	if (dev_match) {
+		ret = FIB_RES_NHC(res)->nhc_scope >= RT_SCOPE_HOST;
+		return ret;
+	}
+	if (no_addr)
+		goto last_resort;
+    // 这里判断如果rp_filter == 1就会丢包
+	if (rpf == 1)
+		goto e_rpf;
+	fl4.flowi4_oif = dev->ifindex;
+
+	ret = 0;
+	if (fib_lookup(net, &fl4, &res, FIB_LOOKUP_IGNORE_LINKSTATE) == 0) {
+		if (res.type == RTN_UNICAST)
+			ret = FIB_RES_NHC(res)->nhc_scope >= RT_SCOPE_HOST;
+	}
+	return ret;
+
+last_resort:
+	if (rpf)
+		goto e_rpf;
+	*itag = 0;
+	return 0;
+
+e_inval:
+	return -EINVAL;
+e_rpf:
+	return -EXDEV;
+}
+```
+
 # 二、ipv4的socket创建
 
 - socket创建的时候会调用`pf->create`对应ipv4的`inet_create`
