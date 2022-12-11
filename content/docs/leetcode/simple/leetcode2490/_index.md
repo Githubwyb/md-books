@@ -1,6 +1,6 @@
 ---
-weight: 6253
-title: "6253. Circular Sentence"
+weight: 2490
+title: "2490. Circular Sentence"
 ---
 
 # 题目
