@@ -1,6 +1,6 @@
 ---
-weight: 6257
-title: "6257. Delete Greatest Value in Each Row"
+weight: 2500
+title: "2500. Delete Greatest Value in Each Row"
 ---
 
 # 题目
