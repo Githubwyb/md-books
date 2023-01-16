@@ -1,6 +1,6 @@
 ---
-weight: 6280
-title: "6280. Closest Prime Numbers in Range"
+weight: 2523
+title: "2523. Closest Prime Numbers in Range"
 ---
 
 # 题目

@@ -1,6 +1,6 @@
 ---
-weight: 2488
-title: "2488. Count Subarrays With Median K"
+weight: 2518
+title: "2518. Number of Great Partitions"
 ---
 
 # 题目

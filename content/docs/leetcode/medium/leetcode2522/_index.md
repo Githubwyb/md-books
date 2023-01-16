@@ -1,6 +1,6 @@
 ---
-weight: 6196
-title: "6196. Partition String Into Substrings With Values at Most K"
+weight: 2522
+title: "2522. Partition String Into Substrings With Values at Most K"
 ---
 
 # 题目

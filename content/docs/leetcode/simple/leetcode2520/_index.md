@@ -1,6 +1,6 @@
 ---
-weight: 6278
-title: "6278. Count the Digits That Divide a Number"
+weight: 2520
+title: "2520. Count the Digits That Divide a Number"
 ---
 
 # 题目
