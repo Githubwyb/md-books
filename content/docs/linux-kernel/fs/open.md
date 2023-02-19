@@ -251,10 +251,13 @@ static struct file *path_openat(struct nameidata *nd,
 		error = do_o_path(nd, flags, file);
 	} else {
 		const char *s = path_init(nd, flags);
+		// link_path_walk找路径的最后一个分量
+		// open_last_lookups对最后一个分量进行处理，会查找文件是否存在，不存在则根据条件创建
 		while (!(error = link_path_walk(s, nd)) &&
 		       (s = open_last_lookups(nd, file, op)) != NULL)
 			;
 		if (!error)
+			// 遍历到后，执行open的后续操作
 			error = do_open(nd, file, op);
 		terminate_walk(nd);
 	}
