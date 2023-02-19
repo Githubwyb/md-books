@@ -1,6 +1,6 @@
 ---
-weight: 6354
-title: "6354. Find the Array Concatenation Value"
+weight: 2562
+title: "2562. Find the Array Concatenation Value"
 ---
 
 # 题目

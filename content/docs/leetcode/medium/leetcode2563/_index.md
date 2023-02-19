@@ -1,6 +1,6 @@
 ---
-weight: 6355
-title: "6355. Count the Number of Fair Pairs"
+weight: 2563
+title: "2563. Count the Number of Fair Pairs"
 ---
 
 # 题目

@@ -1,6 +1,6 @@
 ---
-weight: 6356
-title: "6356. Substring XOR Queries"
+weight: 2564
+title: "2564. Substring XOR Queries"
 ---
 
 # 题目
