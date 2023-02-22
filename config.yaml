@@ -16,6 +16,7 @@ markup:
       unsafe: true
   tableOfContents:
     startLevel: 1
+    endLevel: 4     # 结束级别，默认3
   highlight:
     codeFences: true
     guessSyntax: false

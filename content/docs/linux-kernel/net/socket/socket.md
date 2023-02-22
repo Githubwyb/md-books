@@ -3,68 +3,88 @@ weight: 1
 title: "socket总述"
 ---
 
-# 一、socket相关系统调用
+# 一、总述
 
-```cpp
-SYSCALL_DEFINE3(socket, int, family, int, type, int, protocol);
-SYSCALL_DEFINE4(socketpair, int, family, int, type, int, protocol, int __user *, usockvec);
-SYSCALL_DEFINE3(bind, int, fd, struct sockaddr __user *, umyaddr, int, addrlen);
-SYSCALL_DEFINE2(listen, int, fd, int, backlog);
-SYSCALL_DEFINE4(accept4, int, fd, struct sockaddr __user *, upeer_sockaddr, int __user *, upeer_addrlen, int, flags);
-SYSCALL_DEFINE3(accept, int, fd, struct sockaddr __user *, upeer_sockaddr, int __user *, upeer_addrlen);
-SYSCALL_DEFINE3(connect, int, fd, struct sockaddr __user *, uservaddr, int, addrlen);
-SYSCALL_DEFINE3(getsockname, int, fd, struct sockaddr __user *, usockaddr, int __user *, usockaddr_len);
-SYSCALL_DEFINE3(getpeername, int, fd, struct sockaddr __user *, usockaddr, int __user *, usockaddr_len);
-SYSCALL_DEFINE6(sendto, int, fd, void __user *, buff, size_t, len, unsigned int, flags, struct sockaddr __user *, addr, int, addr_len);
-SYSCALL_DEFINE4(send, int, fd, void __user *, buff, size_t, len, unsigned int, flags);
-SYSCALL_DEFINE6(recvfrom, int, fd, void __user *, ubuf, size_t, size, unsigned int, flags, struct sockaddr __user *, addr, int __user *, addr_len);
-SYSCALL_DEFINE4(recv, int, fd, void __user *, ubuf, size_t, size, unsigned int, flags);
-SYSCALL_DEFINE5(setsockopt, int, fd, int, level, int, optname, char __user *, optval, int, optlen);
-SYSCALL_DEFINE5(getsockopt, int, fd, int, level, int, optname, char __user *, optval, int __user *, optlen);
-SYSCALL_DEFINE2(shutdown, int, fd, int, how);
-SYSCALL_DEFINE3(sendmsg, int, fd, struct user_msghdr __user *, msg, unsigned int, flags);
-SYSCALL_DEFINE4(sendmmsg, int, fd, struct mmsghdr __user *, mmsg, unsigned int, vlen, unsigned int, flags);
-SYSCALL_DEFINE3(recvmsg, int, fd, struct user_msghdr __user *, msg, unsigned int, flags);
-SYSCALL_DEFINE5(recvmmsg, int, fd, struct mmsghdr __user *, mmsg, unsigned int, vlen, unsigned int, flags, struct __kernel_timespec __user *, timeout);
-SYSCALL_DEFINE5(recvmmsg_time32, int, fd, struct mmsghdr __user *, mmsg, unsigned int, vlen, unsigned int, flags, struct old_timespec32 __user *, timeout);
-SYSCALL_DEFINE2(socketcall, int, call, unsigned long __user *, args);
-```
-
-# 二、socket创建过程
-
-- socket创建需要使用family、type和protocol
-- 在底层socket可以说相当于一个基类，将底层不同类型封装成统一的接口
+## 1. 结构体
 
 ```plantuml
-@startuml
-class net_families {
-    net_proto_family[NPROTO]
+@startuml xxx
+
+namespace 用户空间 {
+    class fd
 }
 
-class net_proto_family {
-    int		family;
-    int		(*create)(struct net *net, struct socket *sock,
-                  int protocol, int kern);
-    struct module	*owner;
+namespace 内核空间 {
+    class socket {
+        struct file		*file;
+        struct sock		*sk;
+        const struct proto_ops	*ops;
+    }
+
+    class file {}
+    class sock {
+
+    }
+    class proto_ops {
+		int		family;
+		int		(*release)   (struct socket *sock);
+		int		(*bind)	     (struct socket *sock, struct sockaddr *myaddr, int sockaddr_len);
+		int		(*connect)   (struct socket *sock, struct sockaddr *vaddr, int sockaddr_len, int flags);
+		int		(*socketpair)(struct socket *sock1, struct socket *sock2);
+		int		(*accept)    (struct socket *sock, struct socket *newsock, int flags, bool kern);
+		int		(*getname)   (struct socket *sock, struct sockaddr *addr, int peer);
+		__poll_t    (*poll)	     (struct file *file, struct socket *sock, struct poll_table_struct *wait);
+		int		(*ioctl)     (struct socket *sock, unsigned int cmd, unsigned long arg);
+		int		(*gettstamp) (struct socket *sock, void __user *userstamp, bool timeval, bool time32);
+		int		(*listen)    (struct socket *sock, int len);
+		int		(*shutdown)  (struct socket *sock, int flags);
+		int		(*setsockopt)(struct socket *sock, int level, int optname, sockptr_t optval, unsigned int optlen);
+		int		(*getsockopt)(struct socket *sock, int level, int optname, char __user *optval, int __user *optlen);
+		void		(*show_fdinfo)(struct seq_file *m, struct socket *sock);
+		int		(*sendmsg)   (struct socket *sock, struct msghdr *m, size_t total_len);
+		int		(*recvmsg)   (struct socket *sock, struct msghdr *m, size_t total_len, int flags);
+		int		(*mmap)	     (struct file *file, struct socket *sock, struct vm_area_struct * vma);
+		ssize_t	(*sendpage)  (struct socket *sock, struct page *page, int offset, size_t size, int flags);
+		ssize_t (*splice_read)(struct socket *sock,  loff_t *ppos, struct pipe_inode_info *pipe, size_t len, unsigned int flags);
+		int		(*set_peek_off)(struct sock *sk, int val);
+		int		(*peek_len)(struct socket *sock);
+		int		(*read_sock)(struct sock *sk, read_descriptor_t *desc, sk_read_actor_t recv_actor);
+		int		(*sendpage_locked)(struct sock *sk, struct page *page, int offset, size_t size, int flags);
+		int		(*sendmsg_locked)(struct sock *sk, struct msghdr *msg, size_t size);
+		int		(*set_rcvlowat)(struct sock *sk, int val);
+	}
+
+    socket <|-- file
+    socket <|-- sock
+    socket <|-- proto_ops
+
+    class net_families {
+        net_proto_family[]
+    }
+
+    class net_proto_family {
+        int		family;
+        int		(*create)(struct net *net, struct socket *sock,
+                    int protocol, int kern);
+    }
+    net_families <|-- net_proto_family
+    net_proto_family --> socket: 根据family调用create创建
+
+    class inet_family_ops implements net_proto_family {
+        .family = PF_INET,
+        .create = inet_create,
+    }
+    class unix_family_ops implements net_proto_family {
+        .family = PF_UNIX,
+	    .create = unix_create,
+    }
 }
 
-class socket() {}
-class inet_init() {}
-class inet6_init() {}
-class af_unix_init() {}
-
-"inet_init()" -up-> net_families : sock_register注册AF_INET
-"inet6_init()" -up-> net_families : sock_register注册AF_INET6
-"af_unix_init()" -up-> net_families : sock_register注册AF_UNIX
-
-"socket()" -down-> net_proto_family : 调用create
-"socket()" -down-> net_families : 根据不同的family获取对应的net_proto_family
-net_proto_family <-left- net_families
-
+用户空间.fd ..> 内核空间.file
 @enduml
 ```
 
-- socket的结构体内容
+### 1.1. socket
 
 ```cpp
 // include/linux/net.h
@@ -93,7 +113,80 @@ struct socket {
 };
 ```
 
-- sock结构体
+#### proto_ops
+
+```cpp
+// include/linux/net.h
+struct proto_ops {
+	int		family;
+	struct module	*owner;
+	int		(*release)   (struct socket *sock);
+	int		(*bind)	     (struct socket *sock,
+				      struct sockaddr *myaddr,
+				      int sockaddr_len);
+	int		(*connect)   (struct socket *sock,
+				      struct sockaddr *vaddr,
+				      int sockaddr_len, int flags);
+	int		(*socketpair)(struct socket *sock1,
+				      struct socket *sock2);
+	int		(*accept)    (struct socket *sock,
+				      struct socket *newsock, int flags, bool kern);
+	int		(*getname)   (struct socket *sock,
+				      struct sockaddr *addr,
+				      int peer);
+	__poll_t	(*poll)	     (struct file *file, struct socket *sock,
+				      struct poll_table_struct *wait);
+	int		(*ioctl)     (struct socket *sock, unsigned int cmd,
+				      unsigned long arg);
+#ifdef CONFIG_COMPAT
+	int	 	(*compat_ioctl) (struct socket *sock, unsigned int cmd,
+				      unsigned long arg);
+#endif
+	int		(*gettstamp) (struct socket *sock, void __user *userstamp,
+				      bool timeval, bool time32);
+	int		(*listen)    (struct socket *sock, int len);
+	int		(*shutdown)  (struct socket *sock, int flags);
+	int		(*setsockopt)(struct socket *sock, int level,
+				      int optname, sockptr_t optval,
+				      unsigned int optlen);
+	int		(*getsockopt)(struct socket *sock, int level,
+				      int optname, char __user *optval, int __user *optlen);
+	void		(*show_fdinfo)(struct seq_file *m, struct socket *sock);
+	int		(*sendmsg)   (struct socket *sock, struct msghdr *m,
+				      size_t total_len);
+	/* Notes for implementing recvmsg:
+	 * ===============================
+	 * msg->msg_namelen should get updated by the recvmsg handlers
+	 * iff msg_name != NULL. It is by default 0 to prevent
+	 * returning uninitialized memory to user space.  The recvfrom
+	 * handlers can assume that msg.msg_name is either NULL or has
+	 * a minimum size of sizeof(struct sockaddr_storage).
+	 */
+	int		(*recvmsg)   (struct socket *sock, struct msghdr *m,
+				      size_t total_len, int flags);
+	int		(*mmap)	     (struct file *file, struct socket *sock,
+				      struct vm_area_struct * vma);
+	ssize_t		(*sendpage)  (struct socket *sock, struct page *page,
+				      int offset, size_t size, int flags);
+	ssize_t 	(*splice_read)(struct socket *sock,  loff_t *ppos,
+				       struct pipe_inode_info *pipe, size_t len, unsigned int flags);
+	int		(*set_peek_off)(struct sock *sk, int val);
+	int		(*peek_len)(struct socket *sock);
+
+	/* The following functions are called internally by kernel with
+	 * sock lock already held.
+	 */
+	int		(*read_sock)(struct sock *sk, read_descriptor_t *desc,
+				     sk_read_actor_t recv_actor);
+	int		(*sendpage_locked)(struct sock *sk, struct page *page,
+					   int offset, size_t size, int flags);
+	int		(*sendmsg_locked)(struct sock *sk, struct msghdr *msg,
+					  size_t size);
+	int		(*set_rcvlowat)(struct sock *sk, int val);
+};
+```
+
+### 1.2. sock
 
 ```cpp
 /**
@@ -389,6 +482,67 @@ struct sock {
 };
 ```
 
+## 2. 相关系统调用
+
+```cpp
+SYSCALL_DEFINE3(socket, int, family, int, type, int, protocol);
+SYSCALL_DEFINE4(socketpair, int, family, int, type, int, protocol, int __user *, usockvec);
+SYSCALL_DEFINE3(bind, int, fd, struct sockaddr __user *, umyaddr, int, addrlen);
+SYSCALL_DEFINE2(listen, int, fd, int, backlog);
+SYSCALL_DEFINE4(accept4, int, fd, struct sockaddr __user *, upeer_sockaddr, int __user *, upeer_addrlen, int, flags);
+SYSCALL_DEFINE3(accept, int, fd, struct sockaddr __user *, upeer_sockaddr, int __user *, upeer_addrlen);
+SYSCALL_DEFINE3(connect, int, fd, struct sockaddr __user *, uservaddr, int, addrlen);
+SYSCALL_DEFINE3(getsockname, int, fd, struct sockaddr __user *, usockaddr, int __user *, usockaddr_len);
+SYSCALL_DEFINE3(getpeername, int, fd, struct sockaddr __user *, usockaddr, int __user *, usockaddr_len);
+SYSCALL_DEFINE6(sendto, int, fd, void __user *, buff, size_t, len, unsigned int, flags, struct sockaddr __user *, addr, int, addr_len);
+SYSCALL_DEFINE4(send, int, fd, void __user *, buff, size_t, len, unsigned int, flags);
+SYSCALL_DEFINE6(recvfrom, int, fd, void __user *, ubuf, size_t, size, unsigned int, flags, struct sockaddr __user *, addr, int __user *, addr_len);
+SYSCALL_DEFINE4(recv, int, fd, void __user *, ubuf, size_t, size, unsigned int, flags);
+SYSCALL_DEFINE5(setsockopt, int, fd, int, level, int, optname, char __user *, optval, int, optlen);
+SYSCALL_DEFINE5(getsockopt, int, fd, int, level, int, optname, char __user *, optval, int __user *, optlen);
+SYSCALL_DEFINE2(shutdown, int, fd, int, how);
+SYSCALL_DEFINE3(sendmsg, int, fd, struct user_msghdr __user *, msg, unsigned int, flags);
+SYSCALL_DEFINE4(sendmmsg, int, fd, struct mmsghdr __user *, mmsg, unsigned int, vlen, unsigned int, flags);
+SYSCALL_DEFINE3(recvmsg, int, fd, struct user_msghdr __user *, msg, unsigned int, flags);
+SYSCALL_DEFINE5(recvmmsg, int, fd, struct mmsghdr __user *, mmsg, unsigned int, vlen, unsigned int, flags, struct __kernel_timespec __user *, timeout);
+SYSCALL_DEFINE5(recvmmsg_time32, int, fd, struct mmsghdr __user *, mmsg, unsigned int, vlen, unsigned int, flags, struct old_timespec32 __user *, timeout);
+SYSCALL_DEFINE2(socketcall, int, call, unsigned long __user *, args);
+```
+
+# 二、socket创建过程
+
+- socket创建需要使用family、type和protocol
+- 在底层socket可以说相当于一个基类，将底层不同类型封装成统一的接口
+
+```plantuml
+@startuml
+class net_families {
+    net_proto_family[NPROTO]
+}
+
+class net_proto_family {
+    int		family;
+    int		(*create)(struct net *net, struct socket *sock,
+                  int protocol, int kern);
+    struct module	*owner;
+}
+
+class socket() {}
+class inet_init() {}
+class inet6_init() {}
+class af_unix_init() {}
+
+"inet_init()" -up-> net_families : sock_register注册AF_INET
+"inet6_init()" -up-> net_families : sock_register注册AF_INET6
+"af_unix_init()" -up-> net_families : sock_register注册AF_UNIX
+
+"socket()" -down-> net_proto_family : 调用create
+"socket()" -down-> net_families : 根据不同的family获取对应的net_proto_family
+net_proto_family <-left- net_families
+
+@enduml
+```
+
 ## 1. 根据family找到对应的socket家族
 
 - 内部使用rcu维护一个`net_families`的指针数组，每个元素是一个`net_proto_family`结构体
@@ -509,57 +663,12 @@ int __sock_create(struct net *net, int family, int type, int protocol,
 }
 ```
 
-### 1.1. unix套接字
-
-```cpp
-// net/unix/af_unix.c
-static const struct net_proto_family unix_family_ops = {
-	.family = PF_UNIX,
-	.create = unix_create,
-	.owner	= THIS_MODULE,
-};
-
-// net/unix/af_unix.c
-static int unix_create(struct net *net, struct socket *sock, int protocol,
-		       int kern)
-{
-	struct sock *sk;
-
-	if (protocol && protocol != PF_UNIX)
-		return -EPROTONOSUPPORT;
-
-	sock->state = SS_UNCONNECTED;
-
-	switch (sock->type) {
-	case SOCK_STREAM:
-		sock->ops = &unix_stream_ops;
-		break;
-		/*
-		 *	Believe it or not BSD has AF_UNIX, SOCK_RAW though
-		 *	nothing uses it.
-		 */
-	case SOCK_RAW:
-		sock->type = SOCK_DGRAM;
-		fallthrough;
-	case SOCK_DGRAM:
-		sock->ops = &unix_dgram_ops;
-		break;
-	case SOCK_SEQPACKET:
-		sock->ops = &unix_seqpacket_ops;
-		break;
-	default:
-		return -ESOCKTNOSUPPORT;
-	}
-
-	sk = unix_create1(net, sock, kern, sock->type);
-	if (IS_ERR(sk))
-		return PTR_ERR(sk);
-
-	return 0;
-}
-```
+- ipv4看 [ipv4创建socket](/docs/linux-kernel/net/ipv4/ipv4/#1-inet_create-socket%E5%88%9B%E5%BB%BA)
+- unix看 [unix创建socket](/docs/linux-kernel/net/unix/unix/#%E4%B8%80socket%E5%88%9B%E5%BB%BA)
 
 ## 2. 创建socket后，创建fd，并将socket和fd绑定
+
+- 设置file的操作集为`socket_file_ops`
 
 ```cpp
 // net/socket.c
@@ -567,13 +676,38 @@ int __sys_socket(int family, int type, int protocol) {
     ...
     return sock_map_fd(sock, flags & (O_CLOEXEC | O_NONBLOCK));
 }
+
+// net/socket.c
 // sock_map_fd() -call-> sock_alloc_file()
+/**
+ *	sock_alloc_file - Bind a &socket to a &file
+ *	@sock: socket
+ *	@flags: file status flags
+ *	@dname: protocol name
+ *
+ *	Returns the &file bound with @sock, implicitly storing it
+ *	in sock->file. If dname is %NULL, sets to "".
+ *	On failure the return is a ERR pointer (see linux/err.h).
+ *	This function uses GFP_KERNEL internally.
+ */
 struct file *sock_alloc_file(struct socket *sock, int flags, const char *dname) {
-    ...
-    sock->file = file;
-    file->private_data = sock;
-    stream_open(SOCK_INODE(sock), file);
-    return file;
+	struct file *file;
+
+	if (!dname)
+		dname = sock->sk ? sock->sk->sk_prot_creator->name : "";
+
+	file = alloc_file_pseudo(SOCK_INODE(sock), sock_mnt, dname,
+				O_RDWR | (flags & O_NONBLOCK),
+				&socket_file_ops);
+	if (IS_ERR(file)) {
+		sock_release(sock);
+		return file;
+	}
+
+	sock->file = file;
+	file->private_data = sock;
+	stream_open(SOCK_INODE(sock), file);
+	return file;
 }
 EXPORT_SYMBOL(sock_alloc_file);
 ```
@@ -613,3 +747,52 @@ void sock_def_readable(struct sock *sk)
 ```
 
 - 各自协议内部有数据后进行调用
+
+# 四、bind 绑定地址
+
+## 1. 系统调用定义
+
+```cpp
+// net/socket.c
+/*
+ *	Bind a name to a socket. Nothing much to do here since it's
+ *	the protocol's responsibility to handle the local address.
+ *
+ *	We move the socket address to kernel space before we call
+ *	the protocol layer (having also checked the address is ok).
+ */
+
+int __sys_bind(int fd, struct sockaddr __user *umyaddr, int addrlen)
+{
+	struct socket *sock;
+	struct sockaddr_storage address;
+	int err, fput_needed;
+
+	// fd找socket结构体
+	sock = sockfd_lookup_light(fd, &err, &fput_needed);
+	if (sock) {
+		// 地址拷贝到内核空间
+		err = move_addr_to_kernel(umyaddr, addrlen, &address);
+		if (!err) {
+			err = security_socket_bind(sock,
+						   (struct sockaddr *)&address,
+						   addrlen);
+			if (!err)
+				// 调用真正的bind函数
+				err = sock->ops->bind(sock,
+						      (struct sockaddr *)
+						      &address, addrlen);
+		}
+		fput_light(sock->file, fput_needed);
+	}
+	return err;
+}
+
+SYSCALL_DEFINE3(bind, int, fd, struct sockaddr __user *, umyaddr, int, addrlen)
+{
+	return __sys_bind(fd, umyaddr, addrlen);
+}
+```
+
+- 调用ops中的bind，ops在各个协议内部进行设置
+- ipv4的tcp看 [tcp处理bind]()

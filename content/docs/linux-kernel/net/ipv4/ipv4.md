@@ -2,20 +2,38 @@
 weight: 10
 ---
 
-# 一、ipv4收包后如何处理
+# 一、初始化注册
 
-## 1. ip层包入口
-
-- 最开始注册一个`packet_type`结构体，定义func为`ip_rcv`，被`inet_init`注册
+```plantuml
+@startuml
+class inet_init
+class net_families {
+    net_proto_family[]
+}
+note bottom of net_families
+socket创建时选择PF_INET
+调用inet_create
+end note
+class inetsw {
+    inet_protosw[]
+}
+note bottom of inetsw
+inet_create中根据具体协议赋值ops
+end note
+class ptype_all {
+    list_head
+}
+note bottom of ptype_all
+网卡收到包后在软中断中的处理
+end note
+inet_init --> net_families: (void)sock_register(&inet_family_ops);
+inet_init --> inetsw: inet_register_protosw(q);
+inet_init --> ptype_all: dev_add_pack(&ip_packet_type);
+@enduml
+```
 
 ```cpp
 // net/ipv4/af_inet.c
-static struct packet_type ip_packet_type __read_mostly = {
-	.type = cpu_to_be16(ETH_P_IP),
-	.func = ip_rcv,
-	.list_func = ip_list_rcv,
-};
-
 static int __init inet_init(void)
 {
 	struct inet_protosw *q;
@@ -43,7 +61,7 @@ static int __init inet_init(void)
 	/*
 	 *	Tell SOCKET that we are alive...
 	 */
-
+	// 向socket注册协议族，这个在socket创建时有用
 	(void)sock_register(&inet_family_ops);
 
 #ifdef CONFIG_SYSCTL
@@ -69,6 +87,7 @@ static int __init inet_init(void)
 	for (r = &inetsw[0]; r < &inetsw[SOCK_MAX]; ++r)
 		INIT_LIST_HEAD(r);
 
+	// 注册下层协议的相关信息到inetsw中
 	for (q = inetsw_array; q < &inetsw_array[INETSW_ARRAY_LEN]; ++q)
 		inet_register_protosw(q);
 
@@ -123,7 +142,7 @@ static int __init inet_init(void)
 
 	ipfrag_init();
 
-    // 注册到dev里面
+    // 注册收包处理
 	dev_add_pack(&ip_packet_type);
 
 	ip_tunnel_core_init();
@@ -143,7 +162,31 @@ out_unregister_tcp_proto:
 fs_initcall(inet_init);
 ```
 
-- 驱动在受到包之后会调用func也就是`ip_rcv`
+# 二、ipv4收包后如何处理
+
+## 1. ip层包入口
+
+### 1.1. 最开始注册一个`packet_type`结构体，定义func为`ip_rcv`，被`inet_init`注册
+
+```cpp
+// net/ipv4/af_inet.c
+static struct packet_type ip_packet_type __read_mostly = {
+	.type = cpu_to_be16(ETH_P_IP),
+	.func = ip_rcv,
+	.list_func = ip_list_rcv,
+};
+
+static int __init inet_init(void)
+{
+	...
+    // 注册到dev里面
+	dev_add_pack(&ip_packet_type);
+	...
+}
+```
+
+### 1.2. ip_rcv 驱动在受到包之后会调用func
+
 - 可以看到这里是netflt的`PRE_ROUTING`链的挂载点
 
 ```cpp
@@ -166,7 +209,120 @@ int ip_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt,
 }
 ```
 
-- `ip_rcv_finish`这里处理了路由，如果路由不过就进行drop
+#### ip_rcv_core 校验包是否是ipv4的包
+
+- 校验ip头的版本是否为v4
+- 校验ip头的checksum是否正确
+
+```cpp
+// net/ipv4/ip_input.c
+/*
+ * 	Main IP Receive routine.
+ */
+static struct sk_buff *ip_rcv_core(struct sk_buff *skb, struct net *net)
+{
+	const struct iphdr *iph;
+	int drop_reason;
+	u32 len;
+
+	/* When the interface is in promisc. mode, drop all the crap
+	 * that it receives, do not try to analyse it.
+	 */
+	if (skb->pkt_type == PACKET_OTHERHOST) {
+		dev_core_stats_rx_otherhost_dropped_inc(skb->dev);
+		drop_reason = SKB_DROP_REASON_OTHERHOST;
+		goto drop;
+	}
+
+	__IP_UPD_PO_STATS(net, IPSTATS_MIB_IN, skb->len);
+
+	skb = skb_share_check(skb, GFP_ATOMIC);
+	if (!skb) {
+		__IP_INC_STATS(net, IPSTATS_MIB_INDISCARDS);
+		goto out;
+	}
+
+	drop_reason = SKB_DROP_REASON_NOT_SPECIFIED;
+	if (!pskb_may_pull(skb, sizeof(struct iphdr)))
+		goto inhdr_error;
+
+	iph = ip_hdr(skb);
+
+	/*
+	 *	RFC1122: 3.2.1.2 MUST silently discard any IP frame that fails the checksum.
+	 *
+	 *	Is the datagram acceptable?
+	 *
+	 *	1.	Length at least the size of an ip header
+	 *	2.	Version of 4
+	 *	3.	Checksums correctly. [Speed optimisation for later, skip loopback checksums]
+	 *	4.	Doesn't have a bogus length
+	 */
+	// 判断版本是否为ipv4
+	if (iph->ihl < 5 || iph->version != 4)
+		goto inhdr_error;
+
+	BUILD_BUG_ON(IPSTATS_MIB_ECT1PKTS != IPSTATS_MIB_NOECTPKTS + INET_ECN_ECT_1);
+	BUILD_BUG_ON(IPSTATS_MIB_ECT0PKTS != IPSTATS_MIB_NOECTPKTS + INET_ECN_ECT_0);
+	BUILD_BUG_ON(IPSTATS_MIB_CEPKTS != IPSTATS_MIB_NOECTPKTS + INET_ECN_CE);
+	__IP_ADD_STATS(net,
+		       IPSTATS_MIB_NOECTPKTS + (iph->tos & INET_ECN_MASK),
+		       max_t(unsigned short, 1, skb_shinfo(skb)->gso_segs));
+
+	if (!pskb_may_pull(skb, iph->ihl*4))
+		goto inhdr_error;
+
+	iph = ip_hdr(skb);
+
+	// 校验checksum，校验失败直接丢包
+	if (unlikely(ip_fast_csum((u8 *)iph, iph->ihl)))
+		goto csum_error;
+
+	len = ntohs(iph->tot_len);
+	if (skb->len < len) {
+		drop_reason = SKB_DROP_REASON_PKT_TOO_SMALL;
+		__IP_INC_STATS(net, IPSTATS_MIB_INTRUNCATEDPKTS);
+		goto drop;
+	} else if (len < (iph->ihl*4))
+		goto inhdr_error;
+
+	/* Our transport medium may have padded the buffer out. Now we know it
+	 * is IP we can trim to the true length of the frame.
+	 * Note this now means skb->len holds ntohs(iph->tot_len).
+	 */
+	if (pskb_trim_rcsum(skb, len)) {
+		__IP_INC_STATS(net, IPSTATS_MIB_INDISCARDS);
+		goto drop;
+	}
+
+	iph = ip_hdr(skb);
+	skb->transport_header = skb->network_header + iph->ihl*4;
+
+	/* Remove any debris in the socket control block */
+	memset(IPCB(skb), 0, sizeof(struct inet_skb_parm));
+	IPCB(skb)->iif = skb->skb_iif;
+
+	/* Must drop socket now because of tproxy. */
+	if (!skb_sk_is_prefetched(skb))
+		skb_orphan(skb);
+
+	return skb;
+
+csum_error:
+	drop_reason = SKB_DROP_REASON_IP_CSUM;
+	__IP_INC_STATS(net, IPSTATS_MIB_CSUMERRORS);
+inhdr_error:
+	if (drop_reason == SKB_DROP_REASON_NOT_SPECIFIED)
+		drop_reason = SKB_DROP_REASON_IP_INHDR;
+	__IP_INC_STATS(net, IPSTATS_MIB_INHDRERRORS);
+drop:
+	kfree_skb_reason(skb, drop_reason);
+out:
+	return NULL;
+}
+```
+
+### 1.3. `ip_rcv_finish`这里处理了路由，如果路由不过就进行drop
 
 ```cpp
 // net/ipv4/ip_input.c
@@ -801,9 +957,82 @@ e_rpf:
 }
 ```
 
-# 二、ipv4的socket创建
 
-- socket创建的时候会调用`pf->create`对应ipv4的`inet_create`
+# 三、socket相关操作
+
+## 1. inet_create socket创建
+
+### 1.1. 注册协议族到socket那边，create调用`inet_create`
+
+```cpp
+// net/ipv4/af_inet.c
+static const struct net_proto_family inet_family_ops = {
+	.family = PF_INET,
+	.create = inet_create,
+	.owner	= THIS_MODULE,
+};
+
+static int __init inet_init(void) {
+    ...
+    (void)sock_register(&inet_family_ops);
+    ...
+}
+```
+
+### 1.2. 注册对应的下层协议到inet_sw中
+
+```cpp
+// net/ipv4/af_inet.c
+// net/ipv4/af_inet.c
+/* Upon startup we insert all the elements in inetsw_array[] into
+ * the linked list inetsw.
+ */
+static struct inet_protosw inetsw_array[] =
+{
+    {
+        .type =       SOCK_STREAM,
+        .protocol =   IPPROTO_TCP,
+        .prot =       &tcp_prot,
+        .ops =        &inet_stream_ops,
+        .flags =      INET_PROTOSW_PERMANENT |
+                  INET_PROTOSW_ICSK,
+    },
+
+    {
+        .type =       SOCK_DGRAM,
+        .protocol =   IPPROTO_UDP,
+        .prot =       &udp_prot,
+        .ops =        &inet_dgram_ops,
+        .flags =      INET_PROTOSW_PERMANENT,
+    },
+
+    {
+        .type =       SOCK_DGRAM,
+        .protocol =   IPPROTO_ICMP,
+        .prot =       &ping_prot,
+        .ops =        &inet_sockraw_ops,
+        .flags =      INET_PROTOSW_REUSE,
+    },
+
+    {
+        .type =       SOCK_RAW,
+        .protocol =   IPPROTO_IP,	/* wild card */
+        .prot =       &raw_prot,
+        .ops =        &inet_sockraw_ops,
+        .flags =      INET_PROTOSW_REUSE,
+    }
+};
+...
+static int __init inet_init(void)
+{
+...
+    for (q = inetsw_array; q < &inetsw_array[INETSW_ARRAY_LEN]; ++q)
+        inet_register_protosw(q);
+...
+}
+```
+
+### 1.3. 调用inet_create创建socket
 
 ```cpp
 // net/ipv4/af_inet.c
@@ -968,112 +1197,63 @@ out_rcu_unlock:
 }
 ```
 
-- `inetsw`定义，通过`inet_register_protosw`进行注册
+## 2. bind 绑定地址
+
+- tcp和udp的bind接口都指向`inet_bind`
 
 ```cpp
 // net/ipv4/af_inet.c
-/* The inetsw table contains everything that inet_create needs to
- * build a new socket.
+const struct proto_ops inet_stream_ops = {
+	...
+	.bind		   = inet_bind,
+	...
+};
+
+// net/ipv4/af_inet.c
+const struct proto_ops inet_dgram_ops = {
+	...
+	.bind		   = inet_bind,
+	...
+};
+
+// net/ipv4/af_inet.c
+/*
+ * For SOCK_RAW sockets; should be the same as inet_dgram_ops but without
+ * udp_poll
  */
-static struct list_head inetsw[SOCK_MAX];
-static DEFINE_SPINLOCK(inetsw_lock);
-...
-void inet_register_protosw(struct inet_protosw *p)
-{
-    struct list_head *lh;
-    struct inet_protosw *answer;
-    int protocol = p->protocol;
-    struct list_head *last_perm;
-
-    spin_lock_bh(&inetsw_lock);
-
-    if (p->type >= SOCK_MAX)
-        goto out_illegal;
-
-    /* If we are trying to override a permanent protocol, bail. */
-    last_perm = &inetsw[p->type];
-    list_for_each(lh, &inetsw[p->type]) {
-        answer = list_entry(lh, struct inet_protosw, list);
-        /* Check only the non-wild match. */
-        if ((INET_PROTOSW_PERMANENT & answer->flags) == 0)
-            break;
-        if (protocol == answer->protocol)
-            goto out_permanent;
-        last_perm = lh;
-    }
-
-    /* Add the new entry after the last permanent entry if any, so that
-     * the new entry does not override a permanent entry when matched with
-     * a wild-card protocol. But it is allowed to override any existing
-     * non-permanent entry.  This means that when we remove this entry, the
-     * system automatically returns to the old behavior.
-     */
-    list_add_rcu(&p->list, last_perm);
-out:
-    spin_unlock_bh(&inetsw_lock);
-
-    return;
-
-out_permanent:
-    pr_err("Attempt to override permanent protocol %d\n", protocol);
-    goto out;
-
-out_illegal:
-    pr_err("Ignoring attempt to register invalid socket type %d\n",
-           p->type);
-    goto out;
-}
-EXPORT_SYMBOL(inet_register_protosw);
+const struct proto_ops inet_sockraw_ops = {
+	...
+	.bind		   = inet_bind,
+	...
+};
 ```
 
-- 在`af_inet`中使用了`inetsw_array`里面定义的结构体进行注册
+### 2.1. inet_bind
 
 ```cpp
 // net/ipv4/af_inet.c
-/* Upon startup we insert all the elements in inetsw_array[] into
- * the linked list inetsw.
- */
-static struct inet_protosw inetsw_array[] =
+int inet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 {
-    {
-        .type =       SOCK_STREAM,
-        .protocol =   IPPROTO_TCP,
-        .prot =       &tcp_prot,
-        .ops =        &inet_stream_ops,
-        .flags =      INET_PROTOSW_PERMANENT |
-                  INET_PROTOSW_ICSK,
-    },
+	struct sock *sk = sock->sk;
+	u32 flags = BIND_WITH_LOCK;
+	int err;
 
-    {
-        .type =       SOCK_DGRAM,
-        .protocol =   IPPROTO_UDP,
-        .prot =       &udp_prot,
-        .ops =        &inet_dgram_ops,
-        .flags =      INET_PROTOSW_PERMANENT,
-    },
+	/* If the socket has its own bind function then use it. (RAW) */
+	if (sk->sk_prot->bind) {
+		return sk->sk_prot->bind(sk, uaddr, addr_len);
+	}
+	if (addr_len < sizeof(struct sockaddr_in))
+		return -EINVAL;
 
-    {
-        .type =       SOCK_DGRAM,
-        .protocol =   IPPROTO_ICMP,
-        .prot =       &ping_prot,
-        .ops =        &inet_sockraw_ops,
-        .flags =      INET_PROTOSW_REUSE,
-    },
+	/* BPF prog is run before any checks are done so that if the prog
+	 * changes context in a wrong way it will be caught.
+	 */
+	err = BPF_CGROUP_RUN_PROG_INET_BIND_LOCK(sk, uaddr,
+						 CGROUP_INET4_BIND, &flags);
+	if (err)
+		return err;
 
-    {
-        .type =       SOCK_RAW,
-        .protocol =   IPPROTO_IP,	/* wild card */
-        .prot =       &raw_prot,
-        .ops =        &inet_sockraw_ops,
-        .flags =      INET_PROTOSW_REUSE,
-    }
-};
-...
-static int __init inet_init(void)
-{
-...
-    for (q = inetsw_array; q < &inetsw_array[INETSW_ARRAY_LEN]; ++q)
-        inet_register_protosw(q);
-...
+	return __inet_bind(sk, uaddr, addr_len, flags);
 }
+EXPORT_SYMBOL(inet_bind);
 ```

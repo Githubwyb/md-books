@@ -944,9 +944,10 @@ static void __netif_receive_skb_list_core(struct list_head *head, bool pfmemallo
 ```
 
 - `netif_receive_skb_core`里面处理包，并添加了trace入口，可以从这个函数进行追踪
-- tcpdump抓包同样也在这里挂载了虚拟协议
+- tcpdump抓包同样也在这里挂载了虚拟协议，不过处理是链式，不考虑返回值，所以所有链上的设备都可以处理此包
 
 ```cpp
+// net/core/dev.c
 static int __netif_receive_skb_core(struct sk_buff **pskb, bool pfmemalloc,
 				    struct packet_type **ppt_prev)
 {
@@ -1059,4 +1060,26 @@ void dev_add_pack(struct packet_type *pt)
 	spin_unlock(&ptype_lock);
 }
 EXPORT_SYMBOL(dev_add_pack);
+```
+
+- ipv4就是注册了此接口，所以ipv4包会调用到`ip_rcv`
+
+```cpp
+// net/ipv4/af_inet.c
+static struct packet_type ip_packet_type __read_mostly = {
+	.type = cpu_to_be16(ETH_P_IP),
+	.func = ip_rcv,
+	.list_func = ip_list_rcv,
+};
+
+// net/ipv4/af_inet.c
+static int __init inet_init(void)
+{
+	...
+    // 注册到dev里面
+	dev_add_pack(&ip_packet_type);
+	...
+}
+
+fs_initcall(inet_init);
 ```
