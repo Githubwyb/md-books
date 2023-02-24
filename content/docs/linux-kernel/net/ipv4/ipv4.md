@@ -2,33 +2,242 @@
 weight: 10
 ---
 
-# 一、初始化注册
+# 一、总述
+
+## 1. 关键结构体关系
+
+```plantuml
+@startuml xxx
+
+class socket {
+    struct sock *sk;
+}
+
+class sock {}
+class inet_sock implements sock {
+    struct sock sk;
+}
+note left of inet_sock
+inet_sock是在sock基础上做了一些拓展
+创建时申请的是inet_sock但是使用sock结构体指针赋值给socket
+在inet里面的操作做强转使用
+end note
+class inet_connection_sock implements inet_sock {
+    struct inet_sock icsk_inet;
+}
+note left of inet_connection_sock
+inet_connection_sock是拓展了inet_sock
+同样复用sock的指针
+end note
+
+socket <|-- sock
+
+@enduml
+```
+
+### 2.1. inet_sock
+
+```cpp
+// include/net/inet_sock.h
+/** struct inet_sock - representation of INET sockets
+ *
+ * @sk - ancestor class
+ * @pinet6 - pointer to IPv6 control block
+ * @inet_daddr - Foreign IPv4 addr
+ * @inet_rcv_saddr - Bound local IPv4 addr
+ * @inet_dport - Destination port
+ * @inet_num - Local port
+ * @inet_saddr - Sending source
+ * @uc_ttl - Unicast TTL
+ * @inet_sport - Source port
+ * @inet_id - ID counter for DF pkts
+ * @tos - TOS
+ * @mc_ttl - Multicasting TTL
+ * @is_icsk - is this an inet_connection_sock?
+ * @uc_index - Unicast outgoing device index
+ * @mc_index - Multicast device index
+ * @mc_list - Group array
+ * @cork - info to build ip hdr on each ip frag while socket is corked
+ */
+struct inet_sock {
+	/* sk and pinet6 has to be the first two members of inet_sock */
+	struct sock		sk;
+#if IS_ENABLED(CONFIG_IPV6)
+	struct ipv6_pinfo	*pinet6;
+#endif
+	/* Socket demultiplex comparisons on incoming packets. */
+#define inet_daddr		sk.__sk_common.skc_daddr
+#define inet_rcv_saddr		sk.__sk_common.skc_rcv_saddr
+#define inet_dport		sk.__sk_common.skc_dport
+#define inet_num		sk.__sk_common.skc_num
+
+	__be32			inet_saddr;
+	__s16			uc_ttl;
+	__u16			cmsg_flags;
+	struct ip_options_rcu __rcu	*inet_opt;
+	__be16			inet_sport;
+	__u16			inet_id;
+
+	__u8			tos;
+	__u8			min_ttl;
+	__u8			mc_ttl;
+	__u8			pmtudisc;
+	__u8			recverr:1,
+				is_icsk:1,
+				freebind:1,
+				hdrincl:1,
+				mc_loop:1,
+				transparent:1,
+				mc_all:1,
+				nodefrag:1;
+	__u8			bind_address_no_port:1,
+				recverr_rfc4884:1,
+				defer_connect:1; /* Indicates that fastopen_connect is set
+						  * and cookie exists so we defer connect
+						  * until first data frame is written
+						  */
+	__u8			rcv_tos;
+	__u8			convert_csum;
+	int			uc_index;
+	int			mc_index;
+	__be32			mc_addr;
+	struct ip_mc_socklist __rcu	*mc_list;
+	struct inet_cork_full	cork;
+};
+```
+
+### 2.2. inet_connection_sock
+
+```cpp
+// include/net/inet_connection_sock.h
+/** inet_connection_sock - INET connection oriented sock
+ *
+ * @icsk_accept_queue:	   FIFO of established children
+ * @icsk_bind_hash:	   Bind node
+ * @icsk_timeout:	   Timeout
+ * @icsk_retransmit_timer: Resend (no ack)
+ * @icsk_rto:		   Retransmit timeout
+ * @icsk_pmtu_cookie	   Last pmtu seen by socket
+ * @icsk_ca_ops		   Pluggable congestion control hook
+ * @icsk_af_ops		   Operations which are AF_INET{4,6} specific
+ * @icsk_ulp_ops	   Pluggable ULP control hook
+ * @icsk_ulp_data	   ULP private data
+ * @icsk_clean_acked	   Clean acked data hook
+ * @icsk_ca_state:	   Congestion control state
+ * @icsk_retransmits:	   Number of unrecovered [RTO] timeouts
+ * @icsk_pending:	   Scheduled timer event
+ * @icsk_backoff:	   Backoff
+ * @icsk_syn_retries:      Number of allowed SYN (or equivalent) retries
+ * @icsk_probes_out:	   unanswered 0 window probes
+ * @icsk_ext_hdr_len:	   Network protocol overhead (IP/IPv6 options)
+ * @icsk_ack:		   Delayed ACK control data
+ * @icsk_mtup;		   MTU probing control data
+ * @icsk_probes_tstamp:    Probe timestamp (cleared by non-zero window ack)
+ * @icsk_user_timeout:	   TCP_USER_TIMEOUT value
+ */
+struct inet_connection_sock {
+	/* inet_sock has to be the first member! */
+	struct inet_sock	  icsk_inet;
+	struct request_sock_queue icsk_accept_queue;
+	struct inet_bind_bucket	  *icsk_bind_hash;
+	unsigned long		  icsk_timeout;
+ 	struct timer_list	  icsk_retransmit_timer;
+ 	struct timer_list	  icsk_delack_timer;
+	__u32			  icsk_rto;
+	__u32                     icsk_rto_min;
+	__u32                     icsk_delack_max;
+	__u32			  icsk_pmtu_cookie;
+	const struct tcp_congestion_ops *icsk_ca_ops;
+	const struct inet_connection_sock_af_ops *icsk_af_ops;
+	const struct tcp_ulp_ops  *icsk_ulp_ops;
+	void __rcu		  *icsk_ulp_data;
+	void (*icsk_clean_acked)(struct sock *sk, u32 acked_seq);
+	unsigned int		  (*icsk_sync_mss)(struct sock *sk, u32 pmtu);
+	__u8			  icsk_ca_state:5,
+				  icsk_ca_initialized:1,
+				  icsk_ca_setsockopt:1,
+				  icsk_ca_dst_locked:1;
+	__u8			  icsk_retransmits;
+	__u8			  icsk_pending;
+	__u8			  icsk_backoff;
+	__u8			  icsk_syn_retries;
+	__u8			  icsk_probes_out;
+	__u16			  icsk_ext_hdr_len;
+	struct {
+		__u8		  pending;	 /* ACK is pending			   */
+		__u8		  quick;	 /* Scheduled number of quick acks	   */
+		__u8		  pingpong;	 /* The session is interactive		   */
+		__u8		  retry;	 /* Number of attempts			   */
+		__u32		  ato;		 /* Predicted tick of soft clock	   */
+		unsigned long	  timeout;	 /* Currently scheduled timeout		   */
+		__u32		  lrcvtime;	 /* timestamp of last received data packet */
+		__u16		  last_seg_size; /* Size of last incoming segment	   */
+		__u16		  rcv_mss;	 /* MSS used for delayed ACK decisions	   */
+	} icsk_ack;
+	struct {
+		/* Range of MTUs to search */
+		int		  search_high;
+		int		  search_low;
+
+		/* Information on the current probe. */
+		u32		  probe_size:31,
+		/* Is the MTUP feature enabled for this connection? */
+				  enabled:1;
+
+		u32		  probe_timestamp;
+	} icsk_mtup;
+	u32			  icsk_probes_tstamp;
+	u32			  icsk_user_timeout;
+
+	u64			  icsk_ca_priv[104 / sizeof(u64)];
+#define ICSK_CA_PRIV_SIZE	  sizeof_field(struct inet_connection_sock, icsk_ca_priv)
+};
+```
+
+## 2. 初始化流程
 
 ```plantuml
 @startuml
-class inet_init
+package inet_init {
+    class sock_register
+    class inet_add_protocol
+    class inet_register_protosw
+    class dev_add_pack
+
+    sock_register .. inet_add_protocol
+    inet_add_protocol .. inet_register_protosw
+    inet_register_protosw .. dev_add_pack
+}
 class net_families {
     net_proto_family[]
 }
-note bottom of net_families
+note right of net_families
 socket创建时选择PF_INET
 调用inet_create
+end note
+class inet_protos {
+    net_protocol[]
+}
+note right of inet_protos
+收包时网络层到传输层处理
 end note
 class inetsw {
     inet_protosw[]
 }
-note bottom of inetsw
+note right of inetsw
 inet_create中根据具体协议赋值ops
 end note
 class ptype_all {
     list_head
 }
-note bottom of ptype_all
-网卡收到包后在软中断中的处理
+note right of ptype_all
+收包时软中断到协议栈处理
+也是数据链路层到网络层
 end note
-inet_init --> net_families: (void)sock_register(&inet_family_ops);
-inet_init --> inetsw: inet_register_protosw(q);
-inet_init --> ptype_all: dev_add_pack(&ip_packet_type);
+sock_register -right-> net_families: (void)sock_register(&inet_family_ops);
+inet_add_protocol -right-> inet_protos: inet_add_protocol(&icmp_protocol, IPPROTO_ICMP)
+inet_register_protosw -right-> inetsw: inet_register_protosw(q);
+dev_add_pack -right-> ptype_all: dev_add_pack(&ip_packet_type);
 @enduml
 ```
 
@@ -71,7 +280,7 @@ static int __init inet_init(void)
 	/*
 	 *	Add all the base protocols.
 	 */
-
+	// 注册传输层协议到网络层，收包使用
 	if (inet_add_protocol(&icmp_protocol, IPPROTO_ICMP) < 0)
 		pr_crit("%s: Cannot add ICMP protocol\n", __func__);
 	if (inet_add_protocol(&udp_protocol, IPPROTO_UDP) < 0)
@@ -1034,6 +1243,8 @@ static int __init inet_init(void)
 
 ### 1.3. 调用inet_create创建socket
 
+- 会继续根据协议找特定协议需要注册的结构，然后调用底层的init
+
 ```cpp
 // net/ipv4/af_inet.c
 /*
@@ -1175,6 +1386,7 @@ lookup_protocol:
     }
 
     if (sk->sk_prot->init) {
+		// 这里调用tcp特定的init
         err = sk->sk_prot->init(sk);
         if (err) {
             sk_common_release(sk);
@@ -1196,6 +1408,8 @@ out_rcu_unlock:
     goto out;
 }
 ```
+
+- tcp相关结构注册查看 [tcp初始化socket](/docs/linux-kernel/net/ipv4/tcp/#2-%E6%B3%A8%E5%86%8C%E5%88%B0socket%E9%87%8C%E9%9D%A2%E7%9A%84%E7%89%B9%E5%AE%9A%E7%BB%93%E6%9E%84)
 
 ## 2. bind 绑定地址
 
@@ -1230,6 +1444,9 @@ const struct proto_ops inet_sockraw_ops = {
 
 ### 2.1. inet_bind
 
+- 主要逻辑是参数检查和赋值，将端口和地址赋值到`inet_sock`的recv的地址上
+- 端口检查要到具体的传输层协议查看
+
 ```cpp
 // net/ipv4/af_inet.c
 int inet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
@@ -1256,4 +1473,249 @@ int inet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 	return __inet_bind(sk, uaddr, addr_len, flags);
 }
 EXPORT_SYMBOL(inet_bind);
+
+// net/ipv4/af_inet.c
+int __inet_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len,
+		u32 flags)
+{
+	struct sockaddr_in *addr = (struct sockaddr_in *)uaddr;
+	struct inet_sock *inet = inet_sk(sk);
+	struct net *net = sock_net(sk);
+	unsigned short snum;
+	int chk_addr_ret;
+	u32 tb_id = RT_TABLE_LOCAL;
+	int err;
+
+	if (addr->sin_family != AF_INET) {
+		/* Compatibility games : accept AF_UNSPEC (mapped to AF_INET)
+		 * only if s_addr is INADDR_ANY.
+		 */
+		err = -EAFNOSUPPORT;
+		if (addr->sin_family != AF_UNSPEC ||
+		    addr->sin_addr.s_addr != htonl(INADDR_ANY))
+			goto out;
+	}
+
+	tb_id = l3mdev_fib_table_by_index(net, sk->sk_bound_dev_if) ? : tb_id;
+	chk_addr_ret = inet_addr_type_table(net, addr->sin_addr.s_addr, tb_id);
+
+	/* Not specified by any standard per-se, however it breaks too
+	 * many applications when removed.  It is unfortunate since
+	 * allowing applications to make a non-local bind solves
+	 * several problems with systems using dynamic addressing.
+	 * (ie. your servers still start up even if your ISDN link
+	 *  is temporarily down)
+	 */
+	err = -EADDRNOTAVAIL;
+	if (!inet_addr_valid_or_nonlocal(net, inet, addr->sin_addr.s_addr,
+	                                 chk_addr_ret))
+		goto out;
+
+	snum = ntohs(addr->sin_port);
+	err = -EACCES;
+	if (!(flags & BIND_NO_CAP_NET_BIND_SERVICE) &&
+	    snum && inet_port_requires_bind_service(net, snum) &&
+	    !ns_capable(net->user_ns, CAP_NET_BIND_SERVICE))
+		goto out;
+
+	/*      We keep a pair of addresses. rcv_saddr is the one
+	 *      used by hash lookups, and saddr is used for transmit.
+	 *
+	 *      In the BSD API these are the same except where it
+	 *      would be illegal to use them (multicast/broadcast) in
+	 *      which case the sending device address is used.
+	 */
+	if (flags & BIND_WITH_LOCK)
+		lock_sock(sk);
+
+	/* Check these errors (active socket, double bind). */
+	err = -EINVAL;
+	if (sk->sk_state != TCP_CLOSE || inet->inet_num)
+		goto out_release_sock;
+
+	inet->inet_rcv_saddr = inet->inet_saddr = addr->sin_addr.s_addr;
+	if (chk_addr_ret == RTN_MULTICAST || chk_addr_ret == RTN_BROADCAST)
+		inet->inet_saddr = 0;  /* Use device */
+
+	/* Make sure we are allowed to bind here. */
+	if (snum || !(inet->bind_address_no_port ||
+		      (flags & BIND_FORCE_ADDRESS_NO_PORT))) {
+		// 有端口的情况下，需要检查端口是否已经占用，这一步要走到tcp自己的端口判断中
+		if (sk->sk_prot->get_port(sk, snum)) {
+			inet->inet_saddr = inet->inet_rcv_saddr = 0;
+			err = -EADDRINUSE;
+			goto out_release_sock;
+		}
+		if (!(flags & BIND_FROM_BPF)) {
+			err = BPF_CGROUP_RUN_PROG_INET4_POST_BIND(sk);
+			if (err) {
+				inet->inet_saddr = inet->inet_rcv_saddr = 0;
+				if (sk->sk_prot->put_port)
+					sk->sk_prot->put_port(sk);
+				goto out_release_sock;
+			}
+		}
+	}
+
+	if (inet->inet_rcv_saddr)
+		sk->sk_userlocks |= SOCK_BINDADDR_LOCK;
+	if (snum)
+		sk->sk_userlocks |= SOCK_BINDPORT_LOCK;
+	inet->inet_sport = htons(inet->inet_num);
+	inet->inet_daddr = 0;
+	inet->inet_dport = 0;
+	sk_dst_reset(sk);
+	err = 0;
+out_release_sock:
+	if (flags & BIND_WITH_LOCK)
+		release_sock(sk);
+out:
+	return err;
+}
+```
+
+- `sk_prot->get_port`检查端口是否可用，tcp的调用到 [inet_sck_get_port](h/docs/linux-kernel/net/ipv4/tcp/#3-bind--sk_prot-get_port-%E6%A3%80%E6%9F%A5%E7%AB%AF%E5%8F%A3%E6%98%AF%E5%90%A6%E5%8F%AF%E7%94%A8)
+
+## 3. listen
+
+### 3.1. 定义
+
+- tcp才有listen，udp和raw协议都没有listen
+
+```cpp
+// net/ipv4/af_inet.c
+const struct proto_ops inet_stream_ops = {
+	...
+	.listen        = inet_listen,
+	...
+};
+
+// net/ipv4/af_inet.c
+const struct proto_ops inet_dgram_ops = {
+	...
+	.listen		   = sock_no_listen,
+	...
+};
+
+// net/ipv4/af_inet.c
+/*
+ * For SOCK_RAW sockets; should be the same as inet_dgram_ops but without
+ * udp_poll
+ */
+const struct proto_ops inet_sockraw_ops = {
+	...
+	.listen		   = sock_no_listen,
+	...
+};
+```
+
+#### sock_no_listen
+
+```cpp
+// net/core/sock.c
+int sock_no_listen(struct socket *sock, int backlog)
+{
+	return -EOPNOTSUPP;
+}
+EXPORT_SYMBOL(sock_no_listen);
+```
+
+### 3.1. inet_listen
+
+- 会给socket分配backlog队列长度，用于存储sync包进来的socket
+
+```cpp
+// net/ipv4/af_inet.c
+/*
+ *	Move a socket into listening state.
+ */
+int inet_listen(struct socket *sock, int backlog)
+{
+	struct sock *sk = sock->sk;
+	unsigned char old_state;
+	int err, tcp_fastopen;
+
+	lock_sock(sk);
+
+	err = -EINVAL;
+	if (sock->state != SS_UNCONNECTED || sock->type != SOCK_STREAM)
+		goto out;
+
+	old_state = sk->sk_state;
+	if (!((1 << old_state) & (TCPF_CLOSE | TCPF_LISTEN)))
+		goto out;
+
+	WRITE_ONCE(sk->sk_max_ack_backlog, backlog);
+	/* Really, if the socket is already in listen state
+	 * we can only allow the backlog to be adjusted.
+	 */
+	if (old_state != TCP_LISTEN) {
+		/* Enable TFO w/o requiring TCP_FASTOPEN socket option.
+		 * Note that only TCP sockets (SOCK_STREAM) will reach here.
+		 * Also fastopen backlog may already been set via the option
+		 * because the socket was in TCP_LISTEN state previously but
+		 * was shutdown() rather than close().
+		 */
+		tcp_fastopen = READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_fastopen);
+		if ((tcp_fastopen & TFO_SERVER_WO_SOCKOPT1) &&
+		    (tcp_fastopen & TFO_SERVER_ENABLE) &&
+		    !inet_csk(sk)->icsk_accept_queue.fastopenq.max_qlen) {
+			fastopen_queue_tune(sk, backlog);
+			tcp_fastopen_init_key_once(sock_net(sk));
+		}
+
+		err = inet_csk_listen_start(sk);
+		if (err)
+			goto out;
+		tcp_call_bpf(sk, BPF_SOCK_OPS_TCP_LISTEN_CB, 0, NULL);
+	}
+	err = 0;
+
+out:
+	release_sock(sk);
+	return err;
+}
+EXPORT_SYMBOL(inet_listen);
+```
+
+### 3.3. inet_csk_listen_start
+
+- 设置状态到`TCP_LISTEN`
+
+```cpp
+// net/ipv4/inet_connection_sock.c
+int inet_csk_listen_start(struct sock *sk)
+{
+	struct inet_connection_sock *icsk = inet_csk(sk);
+	struct inet_sock *inet = inet_sk(sk);
+	int err = -EADDRINUSE;
+
+	reqsk_queue_alloc(&icsk->icsk_accept_queue);
+
+	sk->sk_ack_backlog = 0;
+	inet_csk_delack_init(sk);
+
+	if (sk->sk_txrehash == SOCK_TXREHASH_DEFAULT)
+		sk->sk_txrehash = READ_ONCE(sock_net(sk)->core.sysctl_txrehash);
+
+	/* There is race window here: we announce ourselves listening,
+	 * but this transition is still not validated by get_port().
+	 * It is OK, because this socket enters to hash table only
+	 * after validation is complete.
+	 */
+	inet_sk_state_store(sk, TCP_LISTEN);
+	if (!sk->sk_prot->get_port(sk, inet->inet_num)) {
+		inet->inet_sport = htons(inet->inet_num);
+
+		sk_dst_reset(sk);
+		err = sk->sk_prot->hash(sk);
+
+		if (likely(!err))
+			return 0;
+	}
+
+	inet_sk_set_state(sk, TCP_CLOSE);
+	return err;
+}
+EXPORT_SYMBOL_GPL(inet_csk_listen_start);
 ```

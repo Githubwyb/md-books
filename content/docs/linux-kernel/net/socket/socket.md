@@ -16,15 +16,32 @@ namespace 用户空间 {
 
 namespace 内核空间 {
     class socket {
+		socket_state	state;
         struct file		*file;
         struct sock		*sk;
         const struct proto_ops	*ops;
     }
+	enum socket_state {
+		SS_FREE = 0,			/* not allocated		*/
+		SS_UNCONNECTED,			/* unconnected to any socket	*/
+		SS_CONNECTING,			/* in process of connecting	*/
+		SS_CONNECTED,			/* connected to socket		*/
+		SS_DISCONNECTING		/* in process of disconnecting	*/
+	}
 
     class file {}
     class sock {
-
+		struc sock_common __sk_common;
     }
+    class sock_common {
+		volatile unsigned char  skc_state;
+        struct proto		*skc_prot;
+    }
+note right of sock
+sk_state => __sk_common.skc_state	tcp状态存在这里
+sk_prot => __sk_common.skc_prot		传输层特殊操作在这里
+end note
+    sock <|-- sock_common
     class proto_ops {
 		int		family;
 		int		(*release)   (struct socket *sock);
@@ -57,6 +74,7 @@ namespace 内核空间 {
     socket <|-- file
     socket <|-- sock
     socket <|-- proto_ops
+    socket <|-- socket_state
 
     class net_families {
         net_proto_family[]
@@ -85,6 +103,8 @@ namespace 内核空间 {
 ```
 
 ### 1.1. socket
+
+- `socket_state`仅代表socket自己的状态，和tcp状态图没关系
 
 ```cpp
 // include/linux/net.h
@@ -189,6 +209,7 @@ struct proto_ops {
 ### 1.2. sock
 
 ```cpp
+// include/net/sock.h
 /**
   *	struct sock - network layer representation of sockets
   *	@__sk_common: shared layout with inet_timewait_sock
@@ -482,6 +503,140 @@ struct sock {
 };
 ```
 
+#### sock_common
+
+```cpp
+// include/net/sock.h
+/**
+ *	struct sock_common - minimal network layer representation of sockets
+ *	@skc_daddr: Foreign IPv4 addr
+ *	@skc_rcv_saddr: Bound local IPv4 addr
+ *	@skc_addrpair: 8-byte-aligned __u64 union of @skc_daddr & @skc_rcv_saddr
+ *	@skc_hash: hash value used with various protocol lookup tables
+ *	@skc_u16hashes: two u16 hash values used by UDP lookup tables
+ *	@skc_dport: placeholder for inet_dport/tw_dport
+ *	@skc_num: placeholder for inet_num/tw_num
+ *	@skc_portpair: __u32 union of @skc_dport & @skc_num
+ *	@skc_family: network address family
+ *	@skc_state: Connection state
+ *	@skc_reuse: %SO_REUSEADDR setting
+ *	@skc_reuseport: %SO_REUSEPORT setting
+ *	@skc_ipv6only: socket is IPV6 only
+ *	@skc_net_refcnt: socket is using net ref counting
+ *	@skc_bound_dev_if: bound device index if != 0
+ *	@skc_bind_node: bind hash linkage for various protocol lookup tables
+ *	@skc_portaddr_node: second hash linkage for UDP/UDP-Lite protocol
+ *	@skc_prot: protocol handlers inside a network family
+ *	@skc_net: reference to the network namespace of this socket
+ *	@skc_v6_daddr: IPV6 destination address
+ *	@skc_v6_rcv_saddr: IPV6 source address
+ *	@skc_cookie: socket's cookie value
+ *	@skc_node: main hash linkage for various protocol lookup tables
+ *	@skc_nulls_node: main hash linkage for TCP/UDP/UDP-Lite protocol
+ *	@skc_tx_queue_mapping: tx queue number for this connection
+ *	@skc_rx_queue_mapping: rx queue number for this connection
+ *	@skc_flags: place holder for sk_flags
+ *		%SO_LINGER (l_onoff), %SO_BROADCAST, %SO_KEEPALIVE,
+ *		%SO_OOBINLINE settings, %SO_TIMESTAMPING settings
+ *	@skc_listener: connection request listener socket (aka rsk_listener)
+ *		[union with @skc_flags]
+ *	@skc_tw_dr: (aka tw_dr) ptr to &struct inet_timewait_death_row
+ *		[union with @skc_flags]
+ *	@skc_incoming_cpu: record/match cpu processing incoming packets
+ *	@skc_rcv_wnd: (aka rsk_rcv_wnd) TCP receive window size (possibly scaled)
+ *		[union with @skc_incoming_cpu]
+ *	@skc_tw_rcv_nxt: (aka tw_rcv_nxt) TCP window next expected seq number
+ *		[union with @skc_incoming_cpu]
+ *	@skc_refcnt: reference count
+ *
+ *	This is the minimal network layer representation of sockets, the header
+ *	for struct sock and struct inet_timewait_sock.
+ */
+struct sock_common {
+	union {
+		__addrpair	skc_addrpair;
+		struct {
+			__be32	skc_daddr;
+			__be32	skc_rcv_saddr;
+		};
+	};
+	union  {
+		unsigned int	skc_hash;
+		__u16		skc_u16hashes[2];
+	};
+	/* skc_dport && skc_num must be grouped as well */
+	union {
+		__portpair	skc_portpair;
+		struct {
+			__be16	skc_dport;
+			__u16	skc_num;
+		};
+	};
+
+	unsigned short		skc_family;
+	volatile unsigned char	skc_state;
+	unsigned char		skc_reuse:4;
+	unsigned char		skc_reuseport:1;
+	unsigned char		skc_ipv6only:1;
+	unsigned char		skc_net_refcnt:1;
+	int			skc_bound_dev_if;
+	union {
+		struct hlist_node	skc_bind_node;
+		struct hlist_node	skc_portaddr_node;
+	};
+	struct proto		*skc_prot;
+	possible_net_t		skc_net;
+
+#if IS_ENABLED(CONFIG_IPV6)
+	struct in6_addr		skc_v6_daddr;
+	struct in6_addr		skc_v6_rcv_saddr;
+#endif
+
+	atomic64_t		skc_cookie;
+
+	/* following fields are padding to force
+	 * offset(struct sock, sk_refcnt) == 128 on 64bit arches
+	 * assuming IPV6 is enabled. We use this padding differently
+	 * for different kind of 'sockets'
+	 */
+	union {
+		unsigned long	skc_flags;
+		struct sock	*skc_listener; /* request_sock */
+		struct inet_timewait_death_row *skc_tw_dr; /* inet_timewait_sock */
+	};
+	/*
+	 * fields between dontcopy_begin/dontcopy_end
+	 * are not copied in sock_copy()
+	 */
+	/* private: */
+	int			skc_dontcopy_begin[0];
+	/* public: */
+	union {
+		struct hlist_node	skc_node;
+		struct hlist_nulls_node skc_nulls_node;
+	};
+	unsigned short		skc_tx_queue_mapping;
+#ifdef CONFIG_SOCK_RX_QUEUE_MAPPING
+	unsigned short		skc_rx_queue_mapping;
+#endif
+	union {
+		int		skc_incoming_cpu;
+		u32		skc_rcv_wnd;
+		u32		skc_tw_rcv_nxt; /* struct tcp_timewait_sock  */
+	};
+
+	refcount_t		skc_refcnt;
+	/* private: */
+	int                     skc_dontcopy_end[0];
+	union {
+		u32		skc_rxhash;
+		u32		skc_window_clamp;
+		u32		skc_tw_snd_nxt; /* struct tcp_timewait_sock */
+	};
+	/* public: */
+};
+```
+
 ## 2. 相关系统调用
 
 ```cpp
@@ -663,7 +818,7 @@ int __sock_create(struct net *net, int family, int type, int protocol,
 }
 ```
 
-- ipv4看 [ipv4创建socket](/docs/linux-kernel/net/ipv4/ipv4/#1-inet_create-socket%E5%88%9B%E5%BB%BA)
+- ipv4的create调用`inet_create`，查看 [ipv4创建socket](/docs/linux-kernel/net/ipv4/ipv4/#1-inet_create-socket%E5%88%9B%E5%BB%BA)
 - unix看 [unix创建socket](/docs/linux-kernel/net/unix/unix/#%E4%B8%80socket%E5%88%9B%E5%BB%BA)
 
 ## 2. 创建socket后，创建fd，并将socket和fd绑定
@@ -750,6 +905,8 @@ void sock_def_readable(struct sock *sk)
 
 # 四、bind 绑定地址
 
+- 端口传0会自动分配一个没有占用的端口给socket
+
 ## 1. 系统调用定义
 
 ```cpp
@@ -796,3 +953,43 @@ SYSCALL_DEFINE3(bind, int, fd, struct sockaddr __user *, umyaddr, int, addrlen)
 
 - 调用ops中的bind，ops在各个协议内部进行设置
 - ipv4的tcp看 [tcp处理bind]()
+
+# 五、listen 监听
+
+## 1. 系统调用
+
+```cpp
+/*
+ *	Perform a listen. Basically, we allow the protocol to do anything
+ *	necessary for a listen, and if that works, we mark the socket as
+ *	ready for listening.
+ */
+
+int __sys_listen(int fd, int backlog)
+{
+	struct socket *sock;
+	int err, fput_needed;
+	int somaxconn;
+
+	sock = sockfd_lookup_light(fd, &err, &fput_needed);
+	if (sock) {
+		somaxconn = sock_net(sock->sk)->core.sysctl_somaxconn;
+		if ((unsigned int)backlog > somaxconn)
+			backlog = somaxconn;
+
+		err = security_socket_listen(sock, backlog);
+		if (!err)
+			err = sock->ops->listen(sock, backlog);
+
+		fput_light(sock->file, fput_needed);
+	}
+	return err;
+}
+
+SYSCALL_DEFINE2(listen, int, fd, int, backlog)
+{
+	return __sys_listen(fd, backlog);
+}
+```
+
+- `sock->ops->listen`调用到具体的 [ipv4调用inet_listen](/docs/linux-kernel/net/ipv4/ipv4/#3-listen) 、 [unix]() 、 [ipv6]()
