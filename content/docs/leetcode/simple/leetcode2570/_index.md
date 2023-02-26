@@ -1,6 +1,6 @@
 ---
-weight: 6362
-title: "6362. Merge Two 2D Arrays by Summing Values"
+weight: 2570
+title: "2570. Merge Two 2D Arrays by Summing Values"
 ---
 
 # 题目

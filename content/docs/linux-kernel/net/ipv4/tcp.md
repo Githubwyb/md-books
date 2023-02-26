@@ -76,7 +76,7 @@ TCP_CLOSE --> TCP_LISTEN: 调用listen系统调用
 
 ```cpp
 // net/core/sock.c
-// ssocket() => __sys_socket() => sock_create() => __sock_create() => inet_create => sock_init_data
+// socket() => __sys_socket() => sock_create() => __sock_create() => inet_create => sock_init_data
 void sock_init_data(struct socket *sock, struct sock *sk)
 {
 	...

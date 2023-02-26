@@ -1,6 +1,6 @@
 ---
-weight: 6365
-title: "6365. Minimum Operations to Reduce an Integer to 0"
+weight: 2571
+title: "2571. Minimum Operations to Reduce an Integer to 0"
 ---
 
 # 题目

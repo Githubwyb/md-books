@@ -1,6 +1,6 @@
 ---
-weight: 6364
-title: "6364. Count the Number of Square-Free Subsets"
+weight: 2573
+title: "2573. Count the Number of Square-Free Subsets"
 ---
 
 # 题目
