@@ -1620,7 +1620,7 @@ int sock_no_listen(struct socket *sock, int backlog)
 EXPORT_SYMBOL(sock_no_listen);
 ```
 
-### 3.1. inet_listen
+### 3.2. inet_listen
 
 - 会给socket分配backlog队列长度，用于存储sync包进来的socket
 
