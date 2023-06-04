@@ -1,6 +1,6 @@
 ---
-weight: 6280
-title: "6280. Closest Prime Numbers in Range"
+weight: 155
+title: "155. Min Stack"
 ---
 
 # 题目

@@ -1,6 +1,6 @@
 ---
 weight: 736
-title: "* 736. Parse Lisp Expression"
+title: "736. Parse Lisp Expression"
 ---
 
 # 题目

@@ -1,6 +1,6 @@
 ---
 weight: 1352
-title: "- 1352. Product of the Last K Numbers"
+title: "1352. Product of the Last K Numbers"
 ---
 
 # 题目

@@ -1,6 +1,6 @@
 ---
 weight: 11
-title: "- 11. Container With Most Water"
+title: "11. Container With Most Water"
 ---
 
 # 题目

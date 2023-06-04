@@ -1,6 +1,6 @@
 ---
 weight: 322
-title: "- 322. Coin Change"
+title: "322. Coin Change"
 ---
 
 # 题目

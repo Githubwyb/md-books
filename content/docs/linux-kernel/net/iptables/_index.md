@@ -51,3 +51,99 @@ weight: 3
 - `-n`: 使用数字形式(--numeric)显示输出结果，如显示IP地址而不是主机名
 - `-v`: 显示详细信息，包括每条规则的匹配包数量和匹配字节数
 - `--line-numbers`: 查看规则时，显示规则的序号
+
+# 二、mark
+
+- linux内核中网络相关的mark有三个，socket中的mark、netfilter的mark、`sk_buff`的mark
+- 分别在下面三个位置
+
+```cpp
+// include/net/sock.h
+/**
+  *	struct sock - network layer representation of sockets
+  ...
+  *	@sk_mark: generic packet mark
+  ...
+  */
+struct sock {
+  ...
+	__u32			sk_mark;
+	...
+};
+
+// include/net/netfilter/nf_conntrack.h
+struct nf_conn {
+  ...
+#if defined(CONFIG_NF_CONNTRACK_MARK)
+	u_int32_t mark;
+#endif
+  ...
+};
+
+// include/linux/skbuff.h
+/**
+ *	struct sk_buff - socket buffer
+  ...
+ *	@mark: Generic packet mark
+  ...
+ */
+struct sk_buff {
+	...
+	union {
+		__u32		mark;
+		__u32		reserved_tailroom;
+	};
+  ...
+};
+```
+
+## 1. socket的mark
+
+- socket的mark使用setsockopt来进行设置
+
+```cpp
+int mark = 100
+setsockopt(fd, SOL_SOCKET, SO_MARK, &mark, sizeof(mark));
+```
+
+- 在使用此socket发包时，会自动添加mark到sk_buff的mark中，代码在下面
+
+```cpp
+// net/ipv4/ip_output.c
+/*
+ *		Add an ip header to a skbuff and send it out.
+ *
+ */
+int ip_build_and_send_pkt(struct sk_buff *skb, const struct sock *sk,
+			  __be32 saddr, __be32 daddr, struct ip_options_rcu *opt,
+			  u8 tos)
+{
+  ...
+	if (!skb->mark)
+		skb->mark = sk->sk_mark;
+
+	/* Send it out. */
+	return ip_local_out(net, skb->sk, skb);
+}
+EXPORT_SYMBOL_GPL(ip_build_and_send_pkt);
+```
+
+## 2. sk_buff的mark
+
+- 使用iptables规则可以将数据包的mark保存到连接跟踪中，然后在回包时将连接跟踪的mark恢复到数据包上
+- 策略路由只能匹配sk_buff的mark
+- 下面使用iptables实现一个转发的需求，虚拟网卡来的发给物理网卡，物理网卡来的转回虚拟网卡
+
+```shell
+# 从虚拟网卡来的包，要转发给物理网卡，在走路由前给连接跟踪添加mark
+# --set-mark 设置mark到连接跟踪上
+iptables -t mangle -A PREROUTING -j CONNMARK -i tun0 --set-mark 1000 -m comment --comment "from tun"
+# 物理网卡回包时，连接跟踪有mark，写到sk_buff中
+# -m connmark --mark 1000   connmark上的mark为1000的包
+# --restore-mark            连接跟踪的mark写到sk_buff上
+iptables -t mangle -A PREROUTING -j CONNMARK -m connmark --mark 1000 ! -i tun+ --restore-mark -m comment --comment "need to tun"
+# 策略路由添加mark为1000的给到1000路由表，fwmark匹配的是sk_buff的mark
+ip rule add fwmark 1000 table 1000
+# 1000的路由表直接把所有流量路由到tun0上去
+ip route add default dev tun0 table 1000
+```

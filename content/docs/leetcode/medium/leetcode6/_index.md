@@ -1,6 +1,6 @@
 ---
 weight: 6
-title: "- 6. ZigZag Conversion"
+title: "6. ZigZag Conversion"
 ---
 
 # 题目

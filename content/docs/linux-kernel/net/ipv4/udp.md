@@ -1,3 +1,7 @@
+---
+title: "udp"
+---
+
 # 一、udp socket如何进行收包
 
 - udp会注册`udp_protocol`到`inet_protos`里面
@@ -62,6 +66,7 @@ int __udp4_lib_rcv(struct sk_buff *skb, struct udp_table *udptable,
 		uh = udp_hdr(skb);
 	}
 
+	// 检查checksum
 	if (udp4_csum_init(skb, uh, proto))
 		goto csum_error;
 
@@ -138,6 +143,76 @@ drop:
 ```
 
 ## 1. 如何查找sk结构体
+
+- `__udp4_lib_lookup_skb`查找sock结构体
+
+```cpp
+// net/ipv4/udp.c
+static inline struct sock *__udp4_lib_lookup_skb(struct sk_buff *skb,
+						 __be16 sport, __be16 dport,
+						 struct udp_table *udptable)
+{
+	const struct iphdr *iph = ip_hdr(skb);
+
+	return __udp4_lib_lookup(dev_net(skb->dev), iph->saddr, sport,
+				 iph->daddr, dport, inet_iif(skb),
+				 inet_sdif(skb), udptable, skb);
+}
+
+// net/ipv4/udp.c
+/* UDP is nearly always wildcards out the wazoo, it makes no sense to try
+ * harder than this. -DaveM
+ */
+struct sock *__udp4_lib_lookup(struct net *net, __be32 saddr,
+		__be16 sport, __be32 daddr, __be16 dport, int dif,
+		int sdif, struct udp_table *udptable, struct sk_buff *skb)
+{
+	unsigned short hnum = ntohs(dport);
+	unsigned int hash2, slot2;
+	struct udp_hslot *hslot2;
+	struct sock *result, *sk;
+
+	hash2 = ipv4_portaddr_hash(net, daddr, hnum);
+	slot2 = hash2 & udptable->mask;
+	hslot2 = &udptable->hash2[slot2];
+
+	/* Lookup connected or non-wildcard socket */
+	// 根据源地址、源端口、目的地址、目的端口查找，这一步找的是有连接的
+	result = udp4_lib_lookup2(net, saddr, sport,
+				  daddr, hnum, dif, sdif,
+				  hslot2, skb);
+	if (!IS_ERR_OR_NULL(result) && result->sk_state == TCP_ESTABLISHED)
+		goto done;
+
+	/* Lookup redirect from BPF */
+	if (static_branch_unlikely(&bpf_sk_lookup_enabled)) {
+		sk = udp4_lookup_run_bpf(net, udptable, skb,
+					 saddr, sport, daddr, hnum, dif);
+		if (sk) {
+			result = sk;
+			goto done;
+		}
+	}
+
+	/* Got non-wildcard socket or error on first lookup */
+	if (result)
+		goto done;
+
+	/* Lookup wildcard sockets */
+	hash2 = ipv4_portaddr_hash(net, htonl(INADDR_ANY), hnum);
+	slot2 = hash2 & udptable->mask;
+	hslot2 = &udptable->hash2[slot2];
+	// 上面找不到就找监听的socket，也就是目的地址为ANY的
+	result = udp4_lib_lookup2(net, saddr, sport,
+				  htonl(INADDR_ANY), hnum, dif, sdif,
+				  hslot2, skb);
+done:
+	if (IS_ERR(result))
+		return NULL;
+	return result;
+}
+EXPORT_SYMBOL_GPL(__udp4_lib_lookup);
+```
 
 ## 2. 找到sk结构体后做什么
 

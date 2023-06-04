@@ -1,77 +1,96 @@
 ---
-weight: 2400
-title: "- 2400. Number of Ways to Reach a Position After Exactly k Steps"
+weight: 2401
+title: "2401. Longest Nice Subarray"
 ---
 
 # 题目
 
-You are given two positive integers startPos and endPos. Initially, you are standing at position startPos on an infinite number line. With one step, you can move either one position to the left, or one position to the right.
+You are given an array nums consisting of positive integers.
 
-Given a positive integer k, return the number of different ways to reach the position endPos starting from startPos, such that you perform exactly k steps. Since the answer may be very large, return it modulo $10^9 + 7$.
+We call a subarray of nums nice if the bitwise `AND` of every pair of elements that are in different positions in the subarray is equal to 0.
 
-Two ways are considered different if the order of the steps made is not exactly the same.
+Return the length of the longest nice subarray.
 
-Note that the number line includes negative integers.
+A subarray is a contiguous part of an array.
+
+Note that subarrays of length 1 are always considered nice.
 
 # 思路1
 
 ## 分析
 
-- 自己虽然想到了动态规划，但是实现的时候没有把动态规划进一步简化，直接超过时间复杂度。。。
-- 直接上简化后的动态规划思路
-- 这道题从数学上分析，就是给定k个空格，存在两种固定数量的棋子，一个向前，一个向后。问在这k个空格中有多少种摆法
-- 那么仔细想一下就推出来，假设n为向前的棋子数，k为空格数，有
-
-$$
-f(n, k) = f(n, k-1) + f(n-1, k-1)
-$$
-
-- 也就是，第一个棋子直接落到第一个位置，剩下的就是`n-1`和`k-1`，或者第一个不落这个棋子，就是`n`和`k-1`
-- 边界条件，`n == k`为1，`n == 1`为k
+- 自己想的，先找到每一个数字向后有几个数字和它优雅
+- 然后倒着找，以每一个数字为最后一个数字，找到前面第几个数字的底线超过或等于此数字
 
 ## 代码实现
 
-- 数组中int初始化为0，那么不用关心`n == k`的情况，因为`n == k`计算的 $f(n, k-1) = 0$，而 $f(n-1, k-1)$ 追溯到 $f(1, 1) = 1$
-
 ```go
-const maxSum int = 1e9 + 7
-
-func abs(x int) int {
-	if x < 0 {
-		return -x
-	}
-	return x
-}
-
-func numberOfWays(startPos int, endPos int, k int) int {
-	diff := abs(startPos - endPos)
-	// 首先判断是否可达
-	if k < diff {
-		return 0
-	}
-	if k == diff {
-		return 1
-	}
-	// 判断是否奇偶不同
-	if (k % 2) != (diff % 2) {
-		return 0
-	}
-
-	n := (k - diff) / 2
-
-	dp := make([][]int, n+1)
-	for i := range dp {
-		dp[i] = make([]int, k+1)
-	}
-
-	for i := 1; i < k+1; i++ {
-		dp[1][i] = i
-		// j最大不超过i
-		for j := 2; j < n+1 && j <= i; j++ {
-			dp[j][i] = (dp[j][i-1] + dp[j-1][i-1]) % maxSum
+func longestNiceSubarray(nums []int) int {
+	// 记录每一个数字向后的优雅数量
+	niceMap := make([]int, len(nums))
+	for i := range nums {
+		niceMap[i] = 1
+		j := i + 1
+		for ; j < len(nums); j++ {
+			if nums[i]&nums[j] != 0 {
+				break
+			}
+		}
+		if j-i > 1 {
+			niceMap[i] = j - i
 		}
 	}
+	// 遍历niceMap查看最大相互优雅数量
+	result := 1
+	// 倒序遍历，在范围内就++
+	for i := len(nums) - 1; i >= result; i-- {
+		j := i - 1
+		for ; j >= 0; j-- {
+			if niceMap[j] < i-j+1 {
+				break
+			}
+		}
+		if i-j > result {
+			result = i - j
+		}
+	}
+	return result
+}
+```
 
-	return dp[n][k]
+# 思路2
+
+## 分析
+
+- 看网上其他人写的，还是自己想简单了，对按位操作不敏感
+- 首先确定一个事实，如果一个数和另一个数按位与为0，说明在二进制上，两个数字的1都分布在不同的位置上
+- 进一步推出，如果一个数组中，所有数字相互之间按位与都为0，说明他们的二进制数字中，没有任何一个1在同一个位置上
+- 我们再次推出，如果一个数字和另外两个数字按位与为0，那么和他们或起来的数字按位与同样为0
+- 那么找一个数字保存前面所有数字的按位与的结果，如果后一个数字和此数字按位与为0，就按位或加进来，否则，将最左边的移出去，也就是异或出去
+
+## 代码
+
+```go
+func max(a, b int) int {
+	if b > a {
+		return b
+	}
+	return a
+}
+
+func longestNiceSubarray1(nums []int) int {
+	result := 1 // 记录最终结果，最少为1
+	left := 0
+	mask := 0 // 记录或的值
+	for right, v := range nums {
+		// 排除不符合条件的
+		for (v & mask) != 0 {
+			mask ^= nums[left]
+			left++
+		}
+		mask |= v
+		result = max(result, right-left+1)
+	}
+	return result
 }
 ```

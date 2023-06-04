@@ -1022,6 +1022,27 @@ another_round:
 - `deliver_skb`就会调用注册的func函数
 
 ```cpp
+/* 到这一步的堆栈信息
+ip_rcv(struct sk_buff * skb, struct net_device * dev, struct packet_type * pt, struct net_device * orig_dev) (/net/ipv4/ip_input.c:565)
+deliver_skb(struct packet_type * pt_prev) (/net/core/dev.c:2189)
+deliver_ptype_list_skb(struct list_head * ptype_list, __be16 type, struct net_device * orig_dev, struct packet_type ** pt, struct sk_buff * skb) (/net/core/dev.c:2204)
+__netif_receive_skb_core(struct sk_buff ** pskb, bool pfmemalloc, struct packet_type ** ppt_prev) (/net/core/dev.c:5440)
+__netif_receive_skb_list_core(struct list_head * head, bool pfmemalloc) (/net/core/dev.c:5560)
+__netif_receive_skb_list(struct list_head * head) (/net/core/dev.c:5627)
+netif_receive_skb_list_internal(struct list_head * head) (/net/core/dev.c:5718)
+gro_normal_list(struct napi_struct * napi) (/include/net/gro.h:430)
+gro_normal_list(struct napi_struct * napi) (/include/net/gro.h:426)
+napi_complete_done(struct napi_struct * n, int work_done) (/net/core/dev.c:6059)
+e1000_clean(struct napi_struct * napi, int budget) (/drivers/net/ethernet/intel/e1000/e1000_main.c:3811)
+__napi_poll(struct napi_struct * n, bool * repoll) (/net/core/dev.c:6492)
+napi_poll(struct list_head * repoll, struct napi_struct * n) (/net/core/dev.c:6559)
+net_rx_action(struct softirq_action * h) (/net/core/dev.c:6670)
+__do_softirq() (/kernel/softirq.c:571)
+invoke_softirq() (/kernel/softirq.c:445)
+__irq_exit_rcu() (/kernel/softirq.c:650)
+irq_exit_rcu() (/kernel/softirq.c:662)
+common_interrupt(struct pt_regs * regs, unsigned long error_code) (/arch/x86/kernel/irq.c:240)
+ */
 // net/core/dev.c
 static inline int deliver_skb(struct sk_buff *skb,
 			      struct packet_type *pt_prev,

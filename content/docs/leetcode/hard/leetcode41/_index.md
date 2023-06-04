@@ -1,6 +1,6 @@
 ---
-weight: 2518
-title: "2518. Number of Great Partitions"
+weight: 41
+title: "41. First Missing Positive"
 ---
 
 # 题目

@@ -1,6 +1,6 @@
 ---
 weight: 8
-title: "- 8. String to Integer (atoi)"
+title: "8. String to Integer (atoi)"
 ---
 
 # 题目

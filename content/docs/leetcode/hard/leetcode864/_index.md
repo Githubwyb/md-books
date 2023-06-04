@@ -1,6 +1,6 @@
 ---
 weight: 864
-title: "* 864. Shortest Path to Get All Keys"
+title: "864. Shortest Path to Get All Keys"
 ---
 
 # 题目

@@ -1,6 +1,6 @@
 ---
 weight: 7
-title: "- 7. Reverse Integer"
+title: "7. Reverse Integer"
 ---
 
 # 题目

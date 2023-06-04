@@ -1,6 +1,6 @@
 ---
 weight: 5
-title: "- 5. Longest Palindromic Substring"
+title: "5. Longest Palindromic Substring"
 ---
 
 # 题目

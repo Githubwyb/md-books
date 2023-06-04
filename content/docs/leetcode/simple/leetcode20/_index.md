@@ -1,6 +1,6 @@
 ---
-weight: 6278
-title: "6278. Count the Digits That Divide a Number"
+weight: 20
+title: "20. Valid Parentheses"
 ---
 
 # 题目

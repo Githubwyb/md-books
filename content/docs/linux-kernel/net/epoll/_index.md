@@ -1039,3 +1039,397 @@ out_unlock:
 #### 总结
 
 - 将socket插入到epoll中最中会将epoll的处理函数插入到socket的等待队列中，socket来消息后会调用
+
+# 五、epoll_wait
+
+## 1. 主体逻辑
+
+- 从系统定义开始
+
+```cpp
+// fs/eventpoll.c
+SYSCALL_DEFINE4(epoll_wait, int, epfd, struct epoll_event __user *, events,
+		int, maxevents, int, timeout)
+{
+	struct timespec64 to;
+
+	return do_epoll_wait(epfd, events, maxevents,
+			     ep_timeout_to_timespec(&to, timeout));
+}
+
+// fs/eventpoll.c
+/*
+ * Implement the event wait interface for the eventpoll file. It is the kernel
+ * part of the user space epoll_wait(2).
+ */
+static int do_epoll_wait(int epfd, struct epoll_event __user *events,
+			 int maxevents, struct timespec64 *to)
+{
+	int error;
+	struct fd f;
+	struct eventpoll *ep;
+
+	/* The maximum number of event must be greater than zero */
+	if (maxevents <= 0 || maxevents > EP_MAX_EVENTS)
+		return -EINVAL;
+
+	/* Verify that the area passed by the user is writeable */
+	if (!access_ok(events, maxevents * sizeof(struct epoll_event)))
+		return -EFAULT;
+
+	/* Get the "struct file *" for the eventpoll file */
+	f = fdget(epfd);
+	if (!f.file)
+		return -EBADF;
+
+	/*
+	 * We have to check that the file structure underneath the fd
+	 * the user passed to us _is_ an eventpoll file.
+	 */
+	error = -EINVAL;
+	if (!is_file_epoll(f.file))
+		goto error_fput;
+
+	/*
+	 * At this point it is safe to assume that the "private_data" contains
+	 * our own data structure.
+	 */
+	ep = f.file->private_data;
+
+	/* Time to fish for events ... */
+	error = ep_poll(ep, events, maxevents, to);
+
+error_fput:
+	fdput(f);
+	return error;
+}
+```
+
+- 主要逻辑在`ep_poll`
+
+```cpp
+// fs/eventpoll.c
+/**
+ * ep_poll - Retrieves ready events, and delivers them to the caller-supplied
+ *           event buffer.
+ *
+ * @ep: Pointer to the eventpoll context.
+ * @events: Pointer to the userspace buffer where the ready events should be
+ *          stored.
+ * @maxevents: Size (in terms of number of events) of the caller event buffer.
+ * @timeout: Maximum timeout for the ready events fetch operation, in
+ *           timespec. If the timeout is zero, the function will not block,
+ *           while if the @timeout ptr is NULL, the function will block
+ *           until at least one event has been retrieved (or an error
+ *           occurred).
+ *
+ * Return: the number of ready events which have been fetched, or an
+ *          error code, in case of error.
+ */
+static int ep_poll(struct eventpoll *ep, struct epoll_event __user *events,
+		   int maxevents, struct timespec64 *timeout)
+{
+	int res, eavail, timed_out = 0;
+	u64 slack = 0;
+	wait_queue_entry_t wait;
+	ktime_t expires, *to = NULL;
+
+	lockdep_assert_irqs_enabled();
+
+	if (timeout && (timeout->tv_sec | timeout->tv_nsec)) {
+		slack = select_estimate_accuracy(timeout);
+		to = &expires;
+		*to = timespec64_to_ktime(*timeout);
+	} else if (timeout) {
+		/*
+		 * Avoid the unnecessary trip to the wait queue loop, if the
+		 * caller specified a non blocking operation.
+		 */
+		timed_out = 1;
+	}
+
+	/*
+	 * This call is racy: We may or may not see events that are being added
+	 * to the ready list under the lock (e.g., in IRQ callbacks). For cases
+	 * with a non-zero timeout, this thread will check the ready list under
+	 * lock and will add to the wait queue.  For cases with a zero
+	 * timeout, the user by definition should not care and will have to
+	 * recheck again.
+	 */
+	// 获取是否有事件
+	eavail = ep_events_available(ep);
+
+	while (1) {
+		if (eavail) {
+			// 有事件就把事件发给用户空间
+			/*
+			 * Try to transfer events to user space. In case we get
+			 * 0 events and there's still timeout left over, we go
+			 * trying again in search of more luck.
+			 */
+			res = ep_send_events(ep, events, maxevents);
+			if (res)
+				return res;
+		}
+
+		// 超时时间处理
+		if (timed_out)
+			return 0;
+
+		eavail = ep_busy_loop(ep, timed_out);
+		if (eavail)
+			continue;
+
+		if (signal_pending(current))
+			return -EINTR;
+
+		/*
+		 * Internally init_wait() uses autoremove_wake_function(),
+		 * thus wait entry is removed from the wait queue on each
+		 * wakeup. Why it is important? In case of several waiters
+		 * each new wakeup will hit the next waiter, giving it the
+		 * chance to harvest new event. Otherwise wakeup can be
+		 * lost. This is also good performance-wise, because on
+		 * normal wakeup path no need to call __remove_wait_queue()
+		 * explicitly, thus ep->lock is not taken, which halts the
+		 * event delivery.
+		 */
+		init_wait(&wait);
+
+		write_lock_irq(&ep->lock);
+		/*
+		 * Barrierless variant, waitqueue_active() is called under
+		 * the same lock on wakeup ep_poll_callback() side, so it
+		 * is safe to avoid an explicit barrier.
+		 */
+		__set_current_state(TASK_INTERRUPTIBLE);
+
+		/*
+		 * Do the final check under the lock. ep_scan_ready_list()
+		 * plays with two lists (->rdllist and ->ovflist) and there
+		 * is always a race when both lists are empty for short
+		 * period of time although events are pending, so lock is
+		 * important.
+		 */
+		// 最后检查一次是否有事件，没有事件就把自己加入到wq中
+		eavail = ep_events_available(ep);
+		if (!eavail)
+			__add_wait_queue_exclusive(&ep->wq, &wait);
+
+		write_unlock_irq(&ep->lock);
+
+		// 这里进入睡眠，带超时时间的睡眠
+		if (!eavail)
+			timed_out = !schedule_hrtimeout_range(to, slack,
+							      HRTIMER_MODE_ABS);
+		// 这里唤醒后，设置进程状态为running
+		__set_current_state(TASK_RUNNING);
+
+		/*
+		 * We were woken up, thus go and try to harvest some events.
+		 * If timed out and still on the wait queue, recheck eavail
+		 * carefully under lock, below.
+		 */
+		eavail = 1;
+
+		// 等待队列不为空，就从等待队列移除等待项
+		if (!list_empty_careful(&wait.entry)) {
+			write_lock_irq(&ep->lock);
+			/*
+			 * If the thread timed out and is not on the wait queue,
+			 * it means that the thread was woken up after its
+			 * timeout expired before it could reacquire the lock.
+			 * Thus, when wait.entry is empty, it needs to harvest
+			 * events.
+			 */
+			if (timed_out)
+				eavail = list_empty(&wait.entry);
+			__remove_wait_queue(&ep->wq, &wait);
+			write_unlock_irq(&ep->lock);
+		}
+	}
+}
+```
+
+- `ep_events_available`主要检查rdllist是否为空
+
+```cpp
+// fs/eventpoll.c
+/**
+ * ep_events_available - Checks if ready events might be available.
+ *
+ * @ep: Pointer to the eventpoll context.
+ *
+ * Return: a value different than %zero if ready events are available,
+ *          or %zero otherwise.
+ */
+static inline int ep_events_available(struct eventpoll *ep)
+{
+	return !list_empty_careful(&ep->rdllist) ||
+		READ_ONCE(ep->ovflist) != EP_UNACTIVE_PTR;
+}
+```
+
+- 水平触发和边沿触发主要逻辑在`ep_send_events`
+- 水平触发就是有事件还是加回就绪队列，同时返回。下一次`epoll_wait`会检查就绪队列被加回的这个事件是否读完了，没读完继续返回，读完了就移除
+
+```cpp
+static int ep_send_events(struct eventpoll *ep,
+			  struct epoll_event __user *events, int maxevents)
+{
+	struct epitem *epi, *tmp;
+	LIST_HEAD(txlist);
+	poll_table pt;
+	int res = 0;
+
+	/*
+	 * Always short-circuit for fatal signals to allow threads to make a
+	 * timely exit without the chance of finding more events available and
+	 * fetching repeatedly.
+	 */
+	if (fatal_signal_pending(current))
+		return -EINTR;
+
+	init_poll_funcptr(&pt, NULL);
+
+	mutex_lock(&ep->mtx);
+	// 把ep->rdlist全部转移到txlist中，清空rdlist
+	ep_start_scan(ep, &txlist);
+
+	// 遍历txlist链表，将所有就绪队列事件取出检查，取出的元素为epi
+	/*
+	 * We can loop without lock because we are passed a task private list.
+	 * Items cannot vanish during the loop we are holding ep->mtx.
+	 */
+	list_for_each_entry_safe(epi, tmp, &txlist, rdllink) {
+		struct wakeup_source *ws;
+		__poll_t revents;
+
+		if (res >= maxevents)
+			break;
+
+		/*
+		 * Activate ep->ws before deactivating epi->ws to prevent
+		 * triggering auto-suspend here (in case we reactive epi->ws
+		 * below).
+		 *
+		 * This could be rearranged to delay the deactivation of epi->ws
+		 * instead, but then epi->ws would temporarily be out of sync
+		 * with ep_is_linked().
+		 */
+		ws = ep_wakeup_source(epi);
+		if (ws) {
+			if (ws->active)
+				__pm_stay_awake(ep->ws);
+			__pm_relax(ws);
+		}
+
+		// 将epi从链表中移除
+		list_del_init(&epi->rdllink);
+
+		// 检查一下epi是否有事件，没事件就跳过
+		/*
+		 * If the event mask intersect the caller-requested one,
+		 * deliver the event to userspace. Again, we are holding ep->mtx,
+		 * so no operations coming from userspace can change the item.
+		 */
+		revents = ep_item_poll(epi, &pt, 1);
+		if (!revents)
+			continue;
+
+		// 有事件将event拷贝到用户空间中，没拷贝成功就加回txlist末尾，退出循环
+		events = epoll_put_uevent(revents, epi->event.data, events);
+		if (!events) {
+			list_add(&epi->rdllink, &txlist);
+			ep_pm_stay_awake(epi);
+			if (!res)
+				res = -EFAULT;
+			break;
+		}
+		res++;
+		if (epi->event.events & EPOLLONESHOT)
+			epi->event.events &= EP_PRIVATE_BITS;
+		else if (!(epi->event.events & EPOLLET)) {
+			// 关键点，如果不是边沿触发也就是水平触发，会把epi加回ep->rdllist
+			// 下次调用epoll_wait时，会直接有就绪队列，上面会判断是否有事件
+			// 如果读完了，就绪队列中会删除此epi；没有读完就会继续返回这个epi
+			/*
+			 * If this file has been added with Level
+			 * Trigger mode, we need to insert back inside
+			 * the ready list, so that the next call to
+			 * epoll_wait() will check again the events
+			 * availability. At this point, no one can insert
+			 * into ep->rdllist besides us. The epoll_ctl()
+			 * callers are locked out by
+			 * ep_scan_ready_list() holding "mtx" and the
+			 * poll callback will queue them in ep->ovflist.
+			 */
+			list_add_tail(&epi->rdllink, &ep->rdllist);
+			ep_pm_stay_awake(epi);
+		}
+	}
+	// 到这里有三个情况
+	// 一个是用户空间给进来的范围写满了，一个是中间拷贝用户空间出错了，还有就是正常读完了
+	// 检查txlist，把txlist剩余的放回ep->rdllist
+	ep_done_scan(ep, &txlist);
+	mutex_unlock(&ep->mtx);
+
+	return res;
+}
+```
+
+- `ep_done_scan`
+
+```cpp
+// fs/eventpoll.c
+static void ep_done_scan(struct eventpoll *ep,
+			 struct list_head *txlist)
+{
+	struct epitem *epi, *nepi;
+
+	write_lock_irq(&ep->lock);
+	// 这里遍历一下当把事件给到用户空间过程中来的事件，放到ep->rdllist中
+	/*
+	 * During the time we spent inside the "sproc" callback, some
+	 * other events might have been queued by the poll callback.
+	 * We re-insert them inside the main ready-list here.
+	 */
+	for (nepi = READ_ONCE(ep->ovflist); (epi = nepi) != NULL;
+	     nepi = epi->next, epi->next = EP_UNACTIVE_PTR) {
+		/*
+		 * We need to check if the item is already in the list.
+		 * During the "sproc" callback execution time, items are
+		 * queued into ->ovflist but the "txlist" might already
+		 * contain them, and the list_splice() below takes care of them.
+		 */
+		if (!ep_is_linked(epi)) {
+			/*
+			 * ->ovflist is LIFO, so we have to reverse it in order
+			 * to keep in FIFO.
+			 */
+			list_add(&epi->rdllink, &ep->rdllist);
+			ep_pm_stay_awake(epi);
+		}
+	}
+	/*
+	 * We need to set back ep->ovflist to EP_UNACTIVE_PTR, so that after
+	 * releasing the lock, events will be queued in the normal way inside
+	 * ep->rdllist.
+	 */
+	WRITE_ONCE(ep->ovflist, EP_UNACTIVE_PTR);
+
+	/*
+	 * Quickly re-inject items left on "txlist".
+	 */
+	list_splice(txlist, &ep->rdllist);
+	__pm_relax(ep->ws);
+
+	// 如果就绪队列还有事件，继续唤醒等待的进程（多进程同时等待同一个epoll的场景）
+	if (!list_empty(&ep->rdllist)) {
+		if (waitqueue_active(&ep->wq))
+			wake_up(&ep->wq);
+	}
+
+	write_unlock_irq(&ep->lock);
+}
+```

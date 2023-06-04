@@ -1,6 +1,6 @@
 ---
 weight: 4
-title: "* 4. Median of Two Sorted Arrays"
+title: "4. Median of Two Sorted Arrays"
 ---
 
 # 题目

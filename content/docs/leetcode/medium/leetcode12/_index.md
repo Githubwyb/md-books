@@ -1,6 +1,6 @@
 ---
 weight: 12
-title: "- 12. Integer to Roman"
+title: "12. Integer to Roman"
 ---
 
 # 题目

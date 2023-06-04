@@ -1,6 +1,6 @@
 ---
 weight: 1169
-title: "- 1169. Invalid Transactions"
+title: "1169. Invalid Transactions"
 ---
 
 # 题目

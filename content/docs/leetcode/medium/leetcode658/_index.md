@@ -1,6 +1,6 @@
 ---
 weight: 658
-title: "- 658. Find K Closest Elements"
+title: "658. Find K Closest Elements"
 ---
 
 # 题目

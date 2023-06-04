@@ -23,7 +23,7 @@ markup:
     lineNoStart: 1
     lineNos: true
     lineNumbersInTable: false
-    style: dracula
+    style: manni
     tabWidth: 4
 
 menu:

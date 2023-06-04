@@ -1,6 +1,6 @@
 ---
 weight: 948
-title: "- 948. Bag of Tokens"
+title: "948. Bag of Tokens"
 ---
 
 # 题目

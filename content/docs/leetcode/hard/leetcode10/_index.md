@@ -1,6 +1,6 @@
 ---
 weight: 10
-title: "* 10. Regular Expression Matching"
+title: "10. Regular Expression Matching"
 ---
 
 # 题目
