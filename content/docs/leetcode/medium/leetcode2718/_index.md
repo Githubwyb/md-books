@@ -1,6 +1,6 @@
 ---
-weight: 6472
-title: "6472. Sum of Matrix After Queries"
+weight: 2718
+title: "2718. Sum of Matrix After Queries"
 ---
 
 # 题目

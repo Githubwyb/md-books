@@ -1,6 +1,6 @@
 ---
-weight: 6424
-title: "6424. Semi-Ordered Permutation"
+weight: 2717
+title: "2717. Semi-Ordered Permutation"
 ---
 
 # 题目

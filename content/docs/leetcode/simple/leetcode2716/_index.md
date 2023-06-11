@@ -1,6 +1,6 @@
 ---
-weight: 6462
-title: "6462. Minimize String Length"
+weight: 2716
+title: "2716. Minimize String Length"
 ---
 
 # 题目

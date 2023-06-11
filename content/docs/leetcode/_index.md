@@ -1,5 +1,5 @@
 ---
-weight: 2
+weight: 99
 bookFlatSection: true
 bookCollapseSection: true
 title: "LeetCode刷题思路总结"
