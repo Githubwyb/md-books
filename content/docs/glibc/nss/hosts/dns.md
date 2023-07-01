@@ -4,6 +4,24 @@ title: "dns 根据/etc/resolv.conf发包处理"
 
 # gethostbyname
 
+## dns的一些系统行为
+
+- 具体代码看 [发送udp包给一个dns服务器](#21-发送udp包给一个dns服务器)
+
+### 1. 什么情况下使用下一个dns服务器，当前结果直接丢弃
+
+1. 当前dns服务器接收失败（网络错误，收包错误等）
+2. dns服务器返回serverfail、notimplement、refused
+3. dns服务器返回正常的情况下，下面条件都满足就尝试下一个
+    - answer为空
+    - 当前dns服务器不是`authoritive answer`
+    - 当前dns服务器不能递归查询
+    - resource为空
+
+### 2. 什么情况下使用tcp进行发送dns
+
+- 返回响应中有tc字段为1
+
 ## 源码
 
 - 从`_nss_dns_gethostbyname3_r`开始
@@ -52,6 +70,7 @@ context_get (bool preinit)
   if (current != NULL)
     return context_reuse ();
 
+	// 这里的_res是一个全局线程安全的变量
   struct resolv_context *ctx = context_alloc (&_res);
   if (ctx == NULL)
     return NULL;
@@ -886,8 +905,8 @@ __res_context_query (struct resolv_context *ctx, const char *name,
 	u_char *buf = alloca (bufsize);
 	u_char *query1 = buf;
 	int nquery1 = -1;
-	u_char *query2 = NULL;
-	int nquery2 = 0;
+	u_char *query2 = NULL;	// 存储AAAA请求
+	int nquery2 = 0;		// query2的长度
 
  again:
     // 构造dns请求包
@@ -895,6 +914,8 @@ __res_context_query (struct resolv_context *ctx, const char *name,
 
 	if (type == T_QUERY_A_AND_AAAA)
 	  {
+		// 要请求A和AAAA，构造A记录存到query1中，AAAA存到query2中
+		// 构造A存到query1中
 	    n = __res_context_mkquery (ctx, QUERY, name, class, T_A, NULL,
 				       query1, bufsize);
 	    if (n > 0)
@@ -920,6 +941,7 @@ __res_context_query (struct resolv_context *ctx, const char *name,
 		  }
 		int nused = n + npad;
 		query2 = buf + nused;
+		// 构造AAAA到query2
 		n = __res_context_mkquery (ctx, QUERY, name, class, T_AAAA,
 					   NULL, query2, bufsize - nused);
 		if (n > 0
@@ -935,6 +957,7 @@ __res_context_query (struct resolv_context *ctx, const char *name,
 	  }
 	else
 	  {
+		// 不是A和AAAA都需要，就只构造query就行了
 	    n = __res_context_mkquery (ctx, QUERY, name, class, type, NULL,
 				       query1, bufsize);
 
@@ -1200,8 +1223,10 @@ __res_context_send (struct resolv_context *ctx,
 				    ansp2, nansp2, resplen2, ansp2_malloced);
 			if (n < 0)
 				return (-1);
+			// n为0且不需要buf2或resplen2为0，尝试下一个
 			if (n == 0 && (buf2 == NULL || *resplen2 == 0))
 				goto next_ns;
+			// v_circuit就使用同一个ns继续发，也就是tcp重新发一次
 			if (v_circuit)
 			  // XXX Check whether both requests failed or
 			  // XXX whether one has been answered successfully
@@ -1251,3 +1276,453 @@ __res_context_send (struct resolv_context *ctx,
 }
 libc_hidden_def (__res_context_send)
 ```
+
+#### 2.1. 发送udp包给一个dns服务器
+
+- 调用`send_dg`
+- 从这里可以看到什么情况下使用下一个dns服务器，什么情况下使用tcp重新发送
+
+```cpp
+// /resolv/res_send.c
+/* The send_dg function is responsible for sending a DNS query over UDP
+   to the nameserver numbered NS from the res_state STATP i.e.
+   EXT(statp).nssocks[ns].  The function supports IPv4 and IPv6 queries
+   along with the ability to send the query in parallel for both stacks
+   (default) or serially (RES_SINGLKUP).  It also supports serial lookup
+   with a close and reopen of the socket used to talk to the server
+   (RES_SNGLKUPREOP) to work around broken name servers.
+
+   The query stored in BUF of BUFLEN length is sent first followed by
+   the query stored in BUF2 of BUFLEN2 length.  Queries are sent
+   in parallel (default) or serially (RES_SINGLKUP or RES_SNGLKUPREOP).
+
+   Answers to the query are stored firstly in *ANSP up to a max of
+   *ANSSIZP bytes.  If more than *ANSSIZP bytes are needed and ANSCP
+   is non-NULL (to indicate that modifying the answer buffer is allowed)
+   then malloc is used to allocate a new response buffer and ANSCP and
+   ANSP will both point to the new buffer.  If more than *ANSSIZP bytes
+   are needed but ANSCP is NULL, then as much of the response as
+   possible is read into the buffer, but the results will be truncated.
+   When truncation happens because of a small answer buffer the DNS
+   packets header field TC will bet set to 1, indicating a truncated
+   message, while the rest of the UDP packet is discarded.
+
+   Answers to the query are stored secondly in *ANSP2 up to a max of
+   *ANSSIZP2 bytes, with the actual response length stored in
+   *RESPLEN2.  If more than *ANSSIZP bytes are needed and ANSP2
+   is non-NULL (required for a second query) then malloc is used to
+   allocate a new response buffer, *ANSSIZP2 is set to the new buffer
+   size and *ANSP2_MALLOCED is set to 1.
+
+   The ANSP2_MALLOCED argument will eventually be removed as the
+   change in buffer pointer can be used to detect the buffer has
+   changed and that the caller should use free on the new buffer.
+
+   Note that the answers may arrive in any order from the server and
+   therefore the first and second answer buffers may not correspond to
+   the first and second queries.
+
+   It is not supported to call this function with a non-NULL ANSP2
+   but a NULL ANSCP.  Put another way, you can call send_vc with a
+   single unmodifiable buffer or two modifiable buffers, but no other
+   combination is supported.
+
+   It is the caller's responsibility to free the malloc allocated
+   buffers by detecting that the pointers have changed from their
+   original values i.e. *ANSCP or *ANSP2 has changed.
+
+   If an answer is truncated because of UDP datagram DNS limits then
+   *V_CIRCUIT is set to 1 and the return value non-zero to indicate to
+   the caller to retry with TCP.  The value *GOTSOMEWHERE is set to 1
+   if any progress was made reading a response from the nameserver and
+   is used by the caller to distinguish between ECONNREFUSED and
+   ETIMEDOUT (the latter if *GOTSOMEWHERE is 1).
+
+   If errors are encountered then *TERRNO is set to an appropriate
+   errno value and a zero result is returned for a recoverable error,
+   and a less-than zero result is returned for a non-recoverable error.
+
+   If no errors are encountered then *TERRNO is left unmodified and
+   a the length of the first response in bytes is returned.  */
+/**
+ * @brief 发送udp包给某个dns服务器
+ *
+ * @param statp dns配置上下文，dns服务器的socket存在EXT(statp).nssocks[ns]中
+ * @param buf 要发送的数据包1，A和AAAA都需要时存放A记录，否则要啥就存啥
+ * @param buflen
+ * @param buf2 要发送的数据包2，A和AAAA都需要时存放AAAA记录，否则为空
+ * @param buflen2
+ * @param ansp
+ * @param anssizp
+ * @param terrno 当有错误时，errno存到这里返回
+ * @param ns dns服务器的索引号
+ * @param v_circuit
+ * @param gotsomewhere
+ * @param anscp
+ * @param ansp2
+ * @param anssizp2
+ * @param resplen2
+ * @param ansp2_malloced
+ * @return int 如果返回1，要使用tcp重新发包
+				如果返回0，当buf2为空或resplen2为0则尝试下一个dns服务器
+				如果返回大于0的其他数，有结果返回
+				如果返回小于0，不可恢复错误
+ */
+static int send_dg(res_state statp, const u_char *buf, int buflen, const u_char *buf2, int buflen2, u_char **ansp,
+                   int *anssizp, int *terrno, int ns, int *v_circuit, int *gotsomewhere, u_char **anscp, u_char **ansp2,
+                   int *anssizp2, int *resplen2, int *ansp2_malloced) {
+    const UHEADER *hp = (UHEADER *)buf;
+    const UHEADER *hp2 = (UHEADER *)buf2;
+    struct timespec now, timeout, finish;
+    struct pollfd pfd[1];
+    int ptimeout;
+    struct sockaddr_in6 from;
+    int resplen = 0;
+    int n;
+
+    /*
+     * Compute time for the total operation.
+     */
+    // 计算超时时间，retrans默认为5，可以配置resolv.conf "options timeout:10"来修改
+    int seconds = (statp->retrans << ns);
+    // nscount为配置的dns服务器数量，一般一个网卡一个到两个
+    // 当ns为0时，seconds为5
+    // 当ns为1时，当nscount为2时，seconds为5；当nscount为3时，seconds为3；当nscount为4时，seconds为2
+    // 当ns为2时，当nscount为2时，seconds为10；当nscount为3时，seconds为6；当nscount为4时，seconds为5
+    if (ns > 0) seconds /= statp->nscount;
+    if (seconds <= 0) seconds = 1;
+    bool single_request_reopen = (statp->options & RES_SNGLKUPREOP) != 0;
+    bool single_request = (((statp->options & RES_SNGLKUP) != 0) | single_request_reopen);
+    int save_gotsomewhere = *gotsomewhere;
+
+    int retval;
+retry_reopen:
+    // 重新建立socket
+    retval = reopen(statp, terrno, ns);
+    if (retval <= 0) {
+        if (resplen2 != NULL) *resplen2 = 0;
+        return retval;
+    }
+retry:
+    // 根据上面的seconds计算超时，存到finish中
+    evNowTime(&now);
+    evConsTime(&timeout, seconds, 0);
+    evAddTime(&finish, &now, &timeout);
+    int need_recompute = 0; // 代表是否需要计算超时时间
+    int nwritten = 0;
+    int recvresp1 = 0;  // buf是否已经收到了响应
+    /* Skip the second response if there is no second query.
+       To do that we mark the second response as received.  */
+    int recvresp2 = buf2 == NULL; // buf2是否已经收到了响应，如果没有buf2，默认为1
+    pfd[0].fd = EXT(statp).nssocks[ns];
+    pfd[0].events = POLLOUT;
+wait:
+    if (need_recompute) {
+        // 需要计算超时，算一下
+    recompute_resend:
+        evNowTime(&now);
+        if (evCmpTime(finish, now) <= 0) {
+        poll_err_out:
+            // 超时了，返回0，resplen2置0，尝试下一个dns服务器
+            return close_and_return_error(statp, resplen2);
+        }
+        evSubTime(&timeout, &finish, &now);
+        need_recompute = 0;
+    }
+    /* Convert struct timespec in milliseconds.  */
+    ptimeout = timeout.tv_sec * 1000 + timeout.tv_nsec / 1000000;
+
+	// 使用poll进行收包
+    n = 0;
+    if (nwritten == 0) n = __poll(pfd, 1, 0);
+    if (__glibc_unlikely(n == 0)) {
+        n = __poll(pfd, 1, ptimeout);
+        need_recompute = 1;
+    }
+    if (n == 0) {
+        if (resplen > 1 && (recvresp1 || (buf2 != NULL && recvresp2))) {
+            /* There are quite a few broken name servers out
+               there which don't handle two outstanding
+               requests from the same source.  There are also
+               broken firewall settings.  If we time out after
+               having received one answer switch to the mode
+               where we send the second request only once we
+               have received the first answer.  */
+            if (!single_request) {
+                statp->options |= RES_SNGLKUP;
+                single_request = true;
+                *gotsomewhere = save_gotsomewhere;
+                goto retry;
+            } else if (!single_request_reopen) {
+                statp->options |= RES_SNGLKUPREOP;
+                single_request_reopen = true;
+                *gotsomewhere = save_gotsomewhere;
+                __res_iclose(statp, false);
+                goto retry_reopen;
+            }
+
+            *resplen2 = 1;
+            return resplen;
+        }
+
+        *gotsomewhere = 1;
+        if (resplen2 != NULL) *resplen2 = 0;
+        return 0;
+    }
+    if (n < 0) {
+        if (errno == EINTR) goto recompute_resend;
+
+        goto poll_err_out;
+    }
+    __set_errno(0);
+    if (pfd[0].revents & POLLOUT) {
+        // POLLOUT代表可以发包了，下面是发送数据包的逻辑，调用sendmsg
+#ifndef __ASSUME_SENDMMSG
+        static int have_sendmmsg;
+#else
+#define have_sendmmsg 1
+#endif
+        if (have_sendmmsg >= 0 && nwritten == 0 && buf2 != NULL && !single_request) {
+            struct iovec iov = {.iov_base = (void *)buf, .iov_len = buflen};
+            struct iovec iov2 = {.iov_base = (void *)buf2, .iov_len = buflen2};
+            struct mmsghdr reqs[2] = {
+                {
+                    .msg_hdr =
+                        {
+                            .msg_iov = &iov,
+                            .msg_iovlen = 1,
+                        },
+                },
+                {.msg_hdr =
+                     {
+                         .msg_iov = &iov2,
+                         .msg_iovlen = 1,
+                     }},
+            };
+
+            int ndg = __sendmmsg(pfd[0].fd, reqs, 2, MSG_NOSIGNAL);
+            if (__glibc_likely(ndg == 2)) {
+                if (reqs[0].msg_len != buflen || reqs[1].msg_len != buflen2) goto fail_sendmmsg;
+
+                pfd[0].events = POLLIN;
+                nwritten += 2;
+            } else if (ndg == 1 && reqs[0].msg_len == buflen)
+                goto just_one;
+            else if (ndg < 0 && (errno == EINTR || errno == EAGAIN))
+                goto recompute_resend;
+            else {
+#ifndef __ASSUME_SENDMMSG
+                if (__glibc_unlikely(have_sendmmsg == 0)) {
+                    if (ndg < 0 && errno == ENOSYS) {
+                        have_sendmmsg = -1;
+                        goto try_send;
+                    }
+                    have_sendmmsg = 1;
+                }
+#endif
+
+            fail_sendmmsg:
+                return close_and_return_error(statp, resplen2);
+            }
+        } else {
+            ssize_t sr;
+#ifndef __ASSUME_SENDMMSG
+        try_send:
+#endif
+            if (nwritten != 0)
+                sr = __send(pfd[0].fd, buf2, buflen2, MSG_NOSIGNAL);
+            else
+                sr = __send(pfd[0].fd, buf, buflen, MSG_NOSIGNAL);
+
+            if (sr != (nwritten != 0 ? buflen2 : buflen)) {
+                if (errno == EINTR || errno == EAGAIN) goto recompute_resend;
+                return close_and_return_error(statp, resplen2);
+            }
+        just_one:
+            if (nwritten != 0 || buf2 == NULL || single_request)
+                pfd[0].events = POLLIN;
+            else
+                pfd[0].events = POLLIN | POLLOUT;
+            ++nwritten;
+        }
+        goto wait;
+    } else if (pfd[0].revents & POLLIN) {
+        // pollin代表有包收到了，这里是收包逻辑
+        int *thisanssizp;
+        u_char **thisansp;
+        int *thisresplenp;  // 当前收包长度
+
+        // 都没收到响应或buf2为空，当前收到包的长度放到resplen
+        // 有一个收到响应，且buf2不为空，当前收包长度放到resp2len
+        if ((recvresp1 | recvresp2) == 0 || buf2 == NULL) {
+            /* We have not received any responses
+               yet or we only have one response to
+               receive.  */
+            thisanssizp = anssizp;
+            thisansp = anscp ?: ansp;
+            assert(anscp != NULL || ansp2 == NULL);
+            thisresplenp = &resplen;
+        } else {
+            thisanssizp = anssizp2;
+            thisansp = ansp2;
+            thisresplenp = resplen2;
+        }
+
+        if (*thisanssizp < MAXPACKET
+            /* If the current buffer is not the the static
+               user-supplied buffer then we can reallocate
+               it.  */
+            && (thisansp != NULL && thisansp != ansp)
+#ifdef FIONREAD
+            /* Is the size too small?  */
+            && (__ioctl(pfd[0].fd, FIONREAD, thisresplenp) < 0 || *thisanssizp < *thisresplenp)
+#endif
+        ) {
+            /* Always allocate MAXPACKET, callers expect
+               this specific size.  */
+            u_char *newp = malloc(MAXPACKET);
+            if (newp != NULL) {
+                *thisanssizp = MAXPACKET;
+                *thisansp = newp;
+                if (thisansp == ansp2) *ansp2_malloced = 1;
+            }
+        }
+        /* We could end up with truncation if anscp was NULL
+           (not allowed to change caller's buffer) and the
+           response buffer size is too small.  This isn't a
+           reliable way to detect truncation because the ioctl
+           may be an inaccurate report of the UDP message size.
+           Therefore we use this only to issue debug output.
+           To do truncation accurately with UDP we need
+           MSG_TRUNC which is only available on Linux.  We
+           can abstract out the Linux-specific feature in the
+           future to detect truncation.  */
+        UHEADER *anhp = (UHEADER *)*thisansp;   // anhp为收到的数据包
+        socklen_t fromlen = sizeof(struct sockaddr_in6);
+        assert(sizeof(from) <= fromlen);
+        *thisresplenp = __recvfrom(pfd[0].fd, (char *)*thisansp, *thisanssizp, 0, (struct sockaddr *)&from, &fromlen);
+        if (__glibc_unlikely(*thisresplenp <= 0)) {
+            if (errno == EINTR || errno == EAGAIN) {
+                // errno为intr或eagin，重新收包，回到wait判断一下超时时间是否到达
+                need_recompute = 1;
+                goto wait;
+            }
+            // 否则收包失败后，返回0，resplen2置0，尝试下一个dns服务器
+            return close_and_return_error(statp, resplen2);
+        }
+        *gotsomewhere = 1;
+        if (__glibc_unlikely(*thisresplenp < HFIXEDSZ)) {
+            // 包长度小于dns固定头部长度12，返回0，resplen2置0，尝试下一个dns服务器
+            /*
+             * Undersized message.
+             */
+            *terrno = EMSGSIZE;
+            return close_and_return_error(statp, resplen2);
+        }
+
+        /* Check for the correct header layout and a matching
+           question.  */
+        int matching_query = 0; /* Default to no matching query.  */
+        // 对比queryid是否匹配，请求的两个id都匹配一下是否对应
+        // 这里说明A记录和AAAA记录的id不能一样
+        if (!recvresp1 && anhp->id == hp->id &&
+            __libc_res_queriesmatch(buf, buf + buflen, *thisansp, *thisansp + *thisanssizp))
+            matching_query = 1;
+        if (!recvresp2 && anhp->id == hp2->id &&
+            __libc_res_queriesmatch(buf2, buf2 + buflen2, *thisansp, *thisansp + *thisanssizp))
+            matching_query = 2;
+        if (matching_query == 0)
+        /* Spurious UDP packet.  Drop it and continue
+           waiting.  */
+        {
+            // 没匹配到，丢包继续等，顺便算一下超时时间
+            need_recompute = 1;
+            goto wait;
+        }
+
+        if (anhp->rcode == SERVFAIL || anhp->rcode == NOTIMP || anhp->rcode == REFUSED) {
+            // 上面三个响应错误要使用下一个dns服务器继续尝试
+        next_ns:
+            // 使用下一个dns服务器继续试的处理
+            if (recvresp1 || (buf2 != NULL && recvresp2)) {
+                // buf已经收到了响应或者buf2已经收到了响应（非这一次）
+                // resplen2置0，返回第一次响应长度
+				// 第一次也是需要下一个dns服务器的错误，则返回0，使用下一个dns服务器继续请求
+				// 第一次不需要下一个dns服务器，就是第一次的长度，不会尝试下一个dns服务器
+                *resplen2 = 0;
+                return resplen;
+            }
+            if (buf2 != NULL) {
+                // 这里就是首次收到响应就有错误且有buf2，等一下两个结果都返回
+                // 把第一次的长度置0，哪个响应哪个为1，然后继续等
+                /* No data from the first reply.  */
+                resplen = 0;
+                /* We are waiting for a possible second reply.  */
+                if (matching_query == 1)
+                    recvresp1 = 1;
+                else
+                    recvresp2 = 1;
+
+                goto wait;
+            }
+
+            /* don't retry if called from dig */
+            // dig会设置pfcode的值，这里判断为0则代表不是dig
+            // 正常解析就直接关闭socket然后返回0
+            if (!statp->pfcode) return close_and_return_error(statp, resplen2);
+            __res_iclose(statp, false);
+        }
+        if (anhp->rcode == NOERROR && anhp->ancount == 0 && anhp->aa == 0 && anhp->ra == 0 && anhp->arcount == 0) {
+            // 没错误，但是不是递归查询且结果为空，尝试下一个dns服务器
+            goto next_ns;
+        }
+        if (!(statp->options & RES_IGNTC) && anhp->tc) {
+            // 非忽略tc的配置下，当响应中有tc字段，设置v_circuit为1，返回长度1
+            // 虽成功但需要使用tcp重新发包，并且只给resplen，resplen2设置为0
+            /*
+             * To get the rest of answer,
+             * use TCP with same server.
+             */
+            *v_circuit = 1;
+            __res_iclose(statp, false);
+            // XXX if we have received one reply we could
+            // XXX use it and not repeat it over TCP...
+            if (resplen2 != NULL) *resplen2 = 0;
+            return (1);
+        }
+        /* Mark which reply we received.  */
+        if (matching_query == 1)
+            recvresp1 = 1;
+        else
+            recvresp2 = 1;
+        /* Repeat waiting if we have a second answer to arrive.  */
+        if ((recvresp1 & recvresp2) == 0) {
+            // 还有一个还没收到响应，继续等
+            if (single_request) {
+                pfd[0].events = POLLOUT;
+                if (single_request_reopen) {
+                    __res_iclose(statp, false);
+                    retval = reopen(statp, terrno, ns);
+                    if (retval <= 0) {
+                        if (resplen2 != NULL) *resplen2 = 0;
+                        return retval;
+                    }
+                    pfd[0].fd = EXT(statp).nssocks[ns];
+                }
+            }
+            goto wait;
+        }
+        /* All is well.  We have received both responses (if
+           two responses were requested).  */
+        return (resplen);
+    } else if (pfd[0].revents & (POLLERR | POLLHUP | POLLNVAL))
+        /* Something went wrong.  We can stop trying.  */
+        return close_and_return_error(statp, resplen2);
+    else {
+        /* poll should not have returned > 0 in this case.  */
+        abort();
+    }
+}
+```
+
+
