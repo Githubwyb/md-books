@@ -434,7 +434,7 @@ WORK_STATE tls_prepare_client_certificate(SSL *s, WORK_STATE wst)
 }
 ```
 
-- 从引擎获取证书
+#### 1) 从引擎获取证书
 
 ```cpp
 /*
@@ -463,8 +463,11 @@ int tls_engine_load_ssl_client_cert(SSL *s, X509 **px509, EVP_PKEY **ppkey)
 #endif
 ```
 
+#### 2) 随着证书到处的key中为什么只需要公钥即可
+
 - pkey中为什么只需要公钥即可，看下面的调用栈，从`SSL_use_PrivateKey`进来
 - 检查`ppkey`就是使用证书的公钥去匹配
+- 本身证书中也只有公钥，想要看证书和`ppkey`是否匹配，就是看公钥的类型、算法、数值是否一致
 
 ```cpp
 /*

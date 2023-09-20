@@ -679,6 +679,61 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
 
 ### 1.3. 客户端
 
+```plantuml
+@startuml
+
+[*] --> TCP_SYN_SENT: 系统调用connect()
+
+TCP_SYN_SENT --> TCP_SYN_RCVD: 接收到SYN-ACK
+
+TCP_SYN_SENT --> TCP_CLOSED: 超时
+
+TCP_SYN_RCVD --> TCP_ESTABLISHED: 接收到ACK
+
+TCP_ESTABLISHED --> TCP_CLOSED: 关闭连接
+
+TCP_CLOSED --> [*]
+
+@enduml
+```
+
+#### 1) `TCP_CLOSED => TCP_SYN_SENT` 关闭状态发起connect系统调用
+
+```cpp
+/*
+tcp_v4_connect(struct sock * sk, struct sockaddr * uaddr, int addr_len) (net/ipv4/tcp_ipv4.c:275)
+__inet_stream_connect(struct socket * sock, struct sockaddr * uaddr, int addr_len, int flags, int is_sendmsg) (net/ipv4/af_inet.c:660)
+inet_stream_connect(struct socket * sock, struct sockaddr * uaddr, int addr_len, int flags) (net/ipv4/af_inet.c:724)
+__sys_connect(int fd, struct sockaddr * uservaddr, int addrlen) (net/socket.c:1996)
+__do_sys_connect(int addrlen, struct sockaddr * uservaddr, int fd) (net/socket.c:2006)
+__se_sys_connect(long addrlen, long uservaddr, long fd) (net/socket.c:2003)
+__x64_sys_connect(const struct pt_regs * regs) (net/socket.c:2003)
+do_syscall_x64(int nr, struct pt_regs * regs) (arch/x86/entry/common.c:50)
+do_syscall_64(struct pt_regs * regs, int nr) (arch/x86/entry/common.c:80)
+entry_SYSCALL_64() (arch/x86/entry/entry_64.S:120)
+[Unknown/Just-In-Time compiled code] (Unknown Source:0)
+fixed_percpu_data (Unknown Source:0)
+[Unknown/Just-In-Time compiled code] (Unknown Source:0)
+fixed_percpu_data (Unknown Source:0)
+[Unknown/Just-In-Time compiled code] (Unknown Source:0)
+ */
+/* This will initiate an outgoing connection. */
+int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
+{
+	...
+	/* Socket identity is still unknown (sport may be zero).
+	 * However we set state to SYN-SENT and not releasing socket
+	 * lock select source port, enter ourselves into the hash tables and
+	 * complete initialization after this.
+	 */
+	// 转到TCP_SYN_SENT状态
+	tcp_set_state(sk, TCP_SYN_SENT);
+	...
+	// 发出sync包
+	err = tcp_connect(sk);
+}
+```
+
 ## 2. TCP_CLOSE状态
 
 ### 2.1. 初始化
@@ -1049,6 +1104,7 @@ tb_found:
 		if ((tb->fastreuse > 0 && reuse) ||
 		    sk_reuseport_match(tb, sk))
 			goto success;
+		// 不是强制复用和快速复用等，进行绑定冲突判断
 		if (inet_csk_bind_conflict(sk, tb, true, true))
 			goto fail_unlock;
 	}
@@ -1066,6 +1122,417 @@ fail_unlock:
 	return ret;
 }
 EXPORT_SYMBOL_GPL(inet_csk_get_port);
+```
+
+- `inet_csk_bind_conflict`进行绑定冲突判断
+
+```cpp
+/** 系统调用栈
+inet_csk_bind_conflict(const struct sock * sk, const struct inet_bind_bucket * tb, bool relax, bool reuseport_ok) (net/ipv4/inet_connection_sock.c:185)
+inet_csk_get_port(struct sock * sk, unsigned short snum) (net/ipv4/inet_connection_sock.c:409)
+__inet_bind(struct sock * sk, struct sockaddr * uaddr, int addr_len, u32 flags) (net/ipv4/af_inet.c:525)
+__sys_bind(int fd, struct sockaddr * umyaddr, int addrlen) (net/socket.c:1776)
+__do_sys_bind(int addrlen, struct sockaddr * umyaddr, int fd) (net/socket.c:1787)
+__se_sys_bind(long addrlen, long umyaddr, long fd) (net/socket.c:1785)
+__x64_sys_bind(const struct pt_regs * regs) (net/socket.c:1785)
+do_syscall_x64(int nr, struct pt_regs * regs) (arch/x86/entry/common.c:50)
+do_syscall_64(struct pt_regs * regs, int nr) (arch/x86/entry/common.c:80)
+entry_SYSCALL_64() (arch/x86/entry/entry_64.S:120)
+fixed_percpu_data (Unknown Source:0)
+[Unknown/Just-In-Time compiled code] (Unknown Source:0)
+ */
+int inet_csk_bind_conflict(const struct sock *sk,
+				  const struct inet_bind_bucket *tb,
+				  bool relax, bool reuseport_ok)
+{
+	struct sock *sk2;
+	bool reuseport_cb_ok;
+	bool reuse = sk->sk_reuse;
+	bool reuseport = !!sk->sk_reuseport;
+	struct sock_reuseport *reuseport_cb;
+	kuid_t uid = sock_i_uid((struct sock *)sk);
+
+	rcu_read_lock();
+	reuseport_cb = rcu_dereference(sk->sk_reuseport_cb);
+	/* paired with WRITE_ONCE() in __reuseport_(add|detach)_closed_sock */
+	reuseport_cb_ok = !reuseport_cb || READ_ONCE(reuseport_cb->num_closed_socks);
+	rcu_read_unlock();
+
+	/*
+	 * Unlike other sk lookup places we do not check
+	 * for sk_net here, since _all_ the socks listed
+	 * in tb->owners list belong to the same net - the
+	 * one this bucket belongs to.
+	 */
+
+	sk_for_each_bound(sk2, &tb->owners) {
+		int bound_dev_if2;
+
+		if (sk == sk2)
+			continue;
+		bound_dev_if2 = READ_ONCE(sk2->sk_bound_dev_if);
+		if ((!sk->sk_bound_dev_if ||
+		     !bound_dev_if2 ||
+		     sk->sk_bound_dev_if == bound_dev_if2)) {
+			if (reuse && sk2->sk_reuse &&
+			    sk2->sk_state != TCP_LISTEN) {
+				if ((!relax ||
+				     (!reuseport_ok &&
+				      reuseport && sk2->sk_reuseport &&
+				      reuseport_cb_ok &&
+				      (sk2->sk_state == TCP_TIME_WAIT ||
+				       uid_eq(uid, sock_i_uid(sk2))))) &&
+				    inet_rcv_saddr_equal(sk, sk2, true))
+					break;
+			} else if (!reuseport_ok ||
+				   !reuseport || !sk2->sk_reuseport ||
+				   !reuseport_cb_ok ||
+				   (sk2->sk_state != TCP_TIME_WAIT &&
+				    !uid_eq(uid, sock_i_uid(sk2)))) {
+				// 这里是判断不能复用或tcp状态不是timewait才判断
+				// 说明timewait状态是可以直接进行绑定源端口的
+
+				// 端口已经被占用就会走到这个位置break掉，sk2有值，返回有冲突
+				if (inet_rcv_saddr_equal(sk, sk2, true))
+					break;
+			}
+		}
+	}
+	return sk2 != NULL;
+}
+```
+
+## 4. `connect => ops->connect => inet_stream_connect => sk_prot->connect`
+
+### 4.1. 先看定义
+
+- 调用到`tcp_v4_connect`
+
+```cpp
+// net/ipv4/tcp_ipv4.c
+struct proto tcp_prot = {
+	...
+	.connect		= tcp_v4_connect,
+	...
+};
+EXPORT_SYMBOL(tcp_prot);
+```
+
+### 4.2. 发起连接的过程
+
+```cpp
+// net/ipv4/tcp_ipv4.c
+/* This will initiate an outgoing connection. */
+int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
+{
+	struct sockaddr_in *usin = (struct sockaddr_in *)uaddr;
+	struct inet_sock *inet = inet_sk(sk);
+	struct tcp_sock *tp = tcp_sk(sk);
+	__be16 orig_sport, orig_dport;
+	__be32 daddr, nexthop;
+	struct flowi4 *fl4;
+	struct rtable *rt;
+	int err;
+	struct ip_options_rcu *inet_opt;
+	struct inet_timewait_death_row *tcp_death_row = sock_net(sk)->ipv4.tcp_death_row;
+
+	if (addr_len < sizeof(struct sockaddr_in))
+		return -EINVAL;
+
+	if (usin->sin_family != AF_INET)
+		return -EAFNOSUPPORT;
+
+	nexthop = daddr = usin->sin_addr.s_addr;
+	inet_opt = rcu_dereference_protected(inet->inet_opt,
+					     lockdep_sock_is_held(sk));
+	if (inet_opt && inet_opt->opt.srr) {
+		if (!daddr)
+			return -EINVAL;
+		nexthop = inet_opt->opt.faddr;
+	}
+
+	orig_sport = inet->inet_sport;
+	orig_dport = usin->sin_port;
+	fl4 = &inet->cork.fl.u.ip4;
+	// 根据路由找源地址，找网卡，使用网卡的ip
+	// 端口为0时，这里还不会分配端口只找ip
+	rt = ip_route_connect(fl4, nexthop, inet->inet_saddr,
+			      sk->sk_bound_dev_if, IPPROTO_TCP, orig_sport,
+			      orig_dport, sk);
+	if (IS_ERR(rt)) {
+		err = PTR_ERR(rt);
+		if (err == -ENETUNREACH)
+			IP_INC_STATS(sock_net(sk), IPSTATS_MIB_OUTNOROUTES);
+		return err;
+	}
+
+	if (rt->rt_flags & (RTCF_MULTICAST | RTCF_BROADCAST)) {
+		ip_rt_put(rt);
+		return -ENETUNREACH;
+	}
+
+	if (!inet_opt || !inet_opt->opt.srr)
+		daddr = fl4->daddr;
+
+	if (!inet->inet_saddr)
+		inet->inet_saddr = fl4->saddr;
+	sk_rcv_saddr_set(sk, inet->inet_saddr);
+
+	if (tp->rx_opt.ts_recent_stamp && inet->inet_daddr != daddr) {
+		/* Reset inherited state */
+		tp->rx_opt.ts_recent	   = 0;
+		tp->rx_opt.ts_recent_stamp = 0;
+		if (likely(!tp->repair))
+			WRITE_ONCE(tp->write_seq, 0);
+	}
+
+	inet->inet_dport = usin->sin_port;
+	sk_daddr_set(sk, daddr);
+
+	inet_csk(sk)->icsk_ext_hdr_len = 0;
+	if (inet_opt)
+		inet_csk(sk)->icsk_ext_hdr_len = inet_opt->opt.optlen;
+
+	tp->rx_opt.mss_clamp = TCP_MSS_DEFAULT;
+
+	/* Socket identity is still unknown (sport may be zero).
+	 * However we set state to SYN-SENT and not releasing socket
+	 * lock select source port, enter ourselves into the hash tables and
+	 * complete initialization after this.
+	 */
+	tcp_set_state(sk, TCP_SYN_SENT);
+	// 这里对于没有源端口（源端口为0）的会进行端口绑定
+	err = inet_hash_connect(tcp_death_row, sk);
+	if (err)
+		goto failure;
+
+	sk_set_txhash(sk);
+
+	rt = ip_route_newports(fl4, rt, orig_sport, orig_dport,
+			       inet->inet_sport, inet->inet_dport, sk);
+	if (IS_ERR(rt)) {
+		err = PTR_ERR(rt);
+		rt = NULL;
+		goto failure;
+	}
+	/* OK, now commit destination to socket.  */
+	sk->sk_gso_type = SKB_GSO_TCPV4;
+	sk_setup_caps(sk, &rt->dst);
+	rt = NULL;
+
+	if (likely(!tp->repair)) {
+		if (!tp->write_seq)
+			WRITE_ONCE(tp->write_seq,
+				   secure_tcp_seq(inet->inet_saddr,
+						  inet->inet_daddr,
+						  inet->inet_sport,
+						  usin->sin_port));
+		tp->tsoffset = secure_tcp_ts_off(sock_net(sk),
+						 inet->inet_saddr,
+						 inet->inet_daddr);
+	}
+
+	inet->inet_id = prandom_u32();
+
+	if (tcp_fastopen_defer_connect(sk, &err))
+		return err;
+	if (err)
+		goto failure;
+
+	// 发起sync包
+	err = tcp_connect(sk);
+
+	if (err)
+		goto failure;
+
+	return 0;
+
+failure:
+	/*
+	 * This unhashes the socket and releases the local port,
+	 * if necessary.
+	 */
+	tcp_set_state(sk, TCP_CLOSE);
+	ip_rt_put(rt);
+	sk->sk_route_caps = 0;
+	inet->inet_dport = 0;
+	return err;
+}
+EXPORT_SYMBOL(tcp_v4_connect);
+```
+
+#### 1) `inet_hash_connect` 绑定端口
+
+```cpp
+// net/ipv4/inet_hashtables.c
+/*
+ * Bind a port for a connect operation and hash it.
+ */
+int inet_hash_connect(struct inet_timewait_death_row *death_row,
+		      struct sock *sk)
+{
+	u64 port_offset = 0;
+
+	if (!inet_sk(sk)->inet_num)
+		port_offset = inet_sk_port_offset(sk);
+	return __inet_hash_connect(death_row, sk, port_offset,
+				   __inet_check_established);
+}
+EXPORT_SYMBOL_GPL(inet_hash_connect);
+```
+
+- 直接调用到`__inet_hash_connect`
+
+```cpp
+/*
+__inet_hash_connect(struct inet_timewait_death_row * death_row, struct sock * sk, u64 port_offset, int (*)(struct inet_timewait_death_row *, struct sock *, __u16, struct inet_timewait_sock **) check_established) (net/ipv4/inet_hashtables.c:727)
+inet_hash_connect(struct inet_timewait_death_row * death_row, struct sock * sk) (net/ipv4/inet_hashtables.c:825)
+tcp_v4_connect(struct sock * sk, struct sockaddr * uaddr, int addr_len) (net/ipv4/tcp_ipv4.c:276)
+__inet_stream_connect(struct socket * sock, struct sockaddr * uaddr, int addr_len, int flags, int is_sendmsg) (net/ipv4/af_inet.c:660)
+inet_stream_connect(struct socket * sock, struct sockaddr * uaddr, int addr_len, int flags) (net/ipv4/af_inet.c:724)
+__sys_connect(int fd, struct sockaddr * uservaddr, int addrlen) (net/socket.c:1996)
+__do_sys_connect(int addrlen, struct sockaddr * uservaddr, int fd) (net/socket.c:2006)
+__se_sys_connect(long addrlen, long uservaddr, long fd) (net/socket.c:2003)
+__x64_sys_connect(const struct pt_regs * regs) (net/socket.c:2003)
+do_syscall_x64(int nr, struct pt_regs * regs) (arch/x86/entry/common.c:50)
+do_syscall_64(struct pt_regs * regs, int nr) (arch/x86/entry/common.c:80)
+entry_SYSCALL_64() (arch/x86/entry/entry_64.S:120)
+[Unknown/Just-In-Time compiled code] (Unknown Source:0)
+fixed_percpu_data (Unknown Source:0)
+[Unknown/Just-In-Time compiled code] (Unknown Source:0)
+fixed_percpu_data (Unknown Source:0)
+[Unknown/Just-In-Time compiled code] (Unknown Source:0)
+ */
+int __inet_hash_connect(struct inet_timewait_death_row *death_row,
+		struct sock *sk, u64 port_offset,
+		int (*check_established)(struct inet_timewait_death_row *,
+			struct sock *, __u16, struct inet_timewait_sock **))
+{
+	struct inet_hashinfo *hinfo = death_row->hashinfo;
+	struct inet_timewait_sock *tw = NULL;
+	struct inet_bind_hashbucket *head;
+	int port = inet_sk(sk)->inet_num;
+	struct net *net = sock_net(sk);
+	struct inet_bind_bucket *tb;
+	u32 remaining, offset;
+	int ret, i, low, high;
+	int l3mdev;
+	u32 index;
+
+	if (port) {
+		// 有端口就在bind的hash表中查找此端口
+		head = &hinfo->bhash[inet_bhashfn(net, port,
+						  hinfo->bhash_size)];
+		tb = inet_csk(sk)->icsk_bind_hash;
+		spin_lock_bh(&head->lock);
+		if (sk_head(&tb->owners) == sk && !sk->sk_bind_node.next) {
+			inet_ehash_nolisten(sk, NULL, NULL);
+			spin_unlock_bh(&head->lock);
+			return 0;
+		}
+		spin_unlock(&head->lock);
+		/* No definite answer... Walk to established hash table */
+		ret = check_established(death_row, sk, port, NULL);
+		local_bh_enable();
+		return ret;
+	}
+
+	l3mdev = inet_sk_bound_l3mdev(sk);
+
+	inet_get_local_port_range(net, &low, &high);
+	high++; /* [32768, 60999] -> [32768, 61000[ */
+	remaining = high - low;
+	if (likely(remaining > 1))
+		remaining &= ~1U;
+
+	net_get_random_once(table_perturb,
+			    INET_TABLE_PERTURB_SIZE * sizeof(*table_perturb));
+	index = port_offset & (INET_TABLE_PERTURB_SIZE - 1);
+
+	offset = READ_ONCE(table_perturb[index]) + (port_offset >> 32);
+	offset %= remaining;
+
+	/* In first pass we try ports of @low parity.
+	 * inet_csk_get_port() does the opposite choice.
+	 */
+	offset &= ~1U;
+other_parity_scan:
+	port = low + offset;
+	// 没端口就开始进行随机查找端口
+	for (i = 0; i < remaining; i += 2, port += 2) {
+		if (unlikely(port >= high))
+			port -= remaining;
+		// 排除保留端口
+		if (inet_is_local_reserved_port(net, port))
+			continue;
+		// 此端口先在bind的hash表中查找一下对应的链表
+		head = &hinfo->bhash[inet_bhashfn(net, port,
+						  hinfo->bhash_size)];
+		spin_lock_bh(&head->lock);
+
+		/* Does not bother with rcv_saddr checks, because
+		 * the established check is already unique enough.
+		 */
+		inet_bind_bucket_for_each(tb, &head->chain) {
+			if (net_eq(ib_net(tb), net) && tb->l3mdev == l3mdev &&
+			    tb->port == port) {
+				if (tb->fastreuse >= 0 ||
+				    tb->fastreuseport >= 0)
+					goto next_port;
+				WARN_ON(hlist_empty(&tb->owners));
+				if (!check_established(death_row, sk,
+						       port, &tw))
+					goto ok;
+				goto next_port;
+			}
+		}
+
+		// 这里是说明此源端口没有在bind的hash表中，新建一个此端口的hash桶
+		tb = inet_bind_bucket_create(hinfo->bind_bucket_cachep,
+					     net, head, port, l3mdev);
+		if (!tb) {
+			spin_unlock_bh(&head->lock);
+			return -ENOMEM;
+		}
+		tb->fastreuse = -1;
+		tb->fastreuseport = -1;
+		goto ok;
+next_port:
+		spin_unlock_bh(&head->lock);
+		cond_resched();
+	}
+
+	offset++;
+	if ((offset & 1) && remaining > 1)
+		goto other_parity_scan;
+
+	return -EADDRNOTAVAIL;
+
+ok:
+	/* Here we want to add a little bit of randomness to the next source
+	 * port that will be chosen. We use a max() with a random here so that
+	 * on low contention the randomness is maximal and on high contention
+	 * it may be inexistent.
+	 */
+	i = max_t(int, i, (prandom_u32() & 7) * 2);
+	WRITE_ONCE(table_perturb[index], READ_ONCE(table_perturb[index]) + i + 2);
+
+	/* Head lock still held and bh's disabled */
+	// 在找到的bind表中此端口对应的tb表中存一下sk
+	inet_bind_hash(sk, tb, port);
+	if (sk_unhashed(sk)) {
+		inet_sk(sk)->inet_sport = htons(port);
+		// 在establish的表中存一下
+		inet_ehash_nolisten(sk, (struct sock *)tw, NULL);
+	}
+	if (tw)
+		inet_twsk_bind_unhash(tw, hinfo);
+	spin_unlock(&head->lock);
+	if (tw)
+		inet_twsk_deschedule_put(tw);
+	local_bh_enable();
+	return 0;
+}
 ```
 
 # 五、tcp处理网卡收到的包
