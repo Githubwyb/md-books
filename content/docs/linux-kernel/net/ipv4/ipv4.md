@@ -1559,6 +1559,8 @@ int __inet_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len,
 	/* Make sure we are allowed to bind here. */
 	if (snum || !(inet->bind_address_no_port ||
 		      (flags & BIND_FORCE_ADDRESS_NO_PORT))) {
+		// 有端口或没有设置绑定地址不绑定端口的flags就会走到绑定端口的处理中
+
 		// 有端口的情况下，需要检查端口是否已经占用，这一步要走到tcp自己的端口判断中
 		if (sk->sk_prot->get_port(sk, snum)) {
 			inet->inet_saddr = inet->inet_rcv_saddr = 0;

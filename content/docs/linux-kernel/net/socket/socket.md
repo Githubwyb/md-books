@@ -952,7 +952,7 @@ SYSCALL_DEFINE3(bind, int, fd, struct sockaddr __user *, umyaddr, int, addrlen)
 ```
 
 - 调用ops中的bind，ops在各个协议内部进行设置
-- ipv4的tcp看 [tcp处理bind]()
+- ipv4的bind看 [bind 绑定地址](/docs/linux-kernel/net/ipv4/ipv4/#2-bind-%E7%BB%91%E5%AE%9A%E5%9C%B0%E5%9D%80)
 
 # 五、listen 监听
 
