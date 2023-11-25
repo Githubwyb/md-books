@@ -1,6 +1,6 @@
 ---
-weight: 6890
-title: "6890. Find the Value of the Partition"
+weight: 2740
+title: "2740. Find the Value of the Partition"
 ---
 
 # 题目

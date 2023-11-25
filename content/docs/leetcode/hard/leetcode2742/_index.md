@@ -1,6 +1,6 @@
 ---
-weight: 6447
-title: "6447. Painting the Walls"
+weight: 2742
+title: "2742. Painting the Walls"
 ---
 
 # 题目

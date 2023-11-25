@@ -1,6 +1,6 @@
 ---
-weight: 6465
-title: "6465. Lexicographically Smallest String After Substring Operation"
+weight: 2734
+title: "2734. Lexicographically Smallest String After Substring Operation"
 ---
 
 # 题目

@@ -1,6 +1,6 @@
 ---
-weight: 6901
-title: "6901. Total Distance Traveled"
+weight: 2739
+title: "2739. Total Distance Traveled"
 ---
 
 # 题目

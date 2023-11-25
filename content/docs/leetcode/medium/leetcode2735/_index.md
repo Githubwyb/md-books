@@ -1,6 +1,6 @@
 ---
-weight: 6449
-title: "6449. Collecting Chocolates"
+weight: 2735
+title: "2735. Collecting Chocolates"
 ---
 
 # 题目
@@ -43,6 +43,7 @@ Constraints:
 ## 分析
 
 - 每次操作，所有数字都会变，那么只能枚举操作次数，计算最小值
+- 找一个数组记录从操作0次操作n次之间的最小值
 - 每一次操作，算一边和，操作最多n次，找到和的最小值
 
 ## 代码

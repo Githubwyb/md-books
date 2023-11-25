@@ -1,6 +1,6 @@
 ---
-weight: 6470
-title: "6470. Neither Minimum nor Maximum"
+weight: 2733
+title: "2733. Neither Minimum nor Maximum"
 ---
 
 # 题目
