@@ -1,6 +1,6 @@
 ---
 weight: 1
-bookFlatSection: true
+bookFlatSection: false
 bookCollapseSection: true
 title: "linux内核源码分析记录"
 ---
