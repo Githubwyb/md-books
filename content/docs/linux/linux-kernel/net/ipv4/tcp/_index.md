@@ -4,6 +4,13 @@ title: "tcp"
 
 # 一、总述
 
+- [【Linux 内核网络协议栈源码剖析】数据包接收(含TCP协议状态变换)](https://www.cnblogs.com/ztguang/p/12645487.html)
+- [深入理解TCP三次握手及其源代码分析](https://www.cnblogs.com/Alexkk/p/12101950.html)
+- [服务器正文22：linux内核网络模块笔记:理解TCP连接建立过程、一条TCP连接多大内存、一台机器最多支持多少条TCP连接、网络优化建议（下）（8/9未完待续）](https://blog.csdn.net/weixin_43679037/article/details/126230288)
+- [TCP连接的状态详解以及故障排查](https://zhuanlan.zhihu.com/p/166440446)
+- [面试官：换人！他连 TCP 这几个参数都不懂](https://zhuanlan.zhihu.com/p/146752547)
+- [万字详解秒杀系统！！](https://blog.csdn.net/flynetcn/article/details/120228586#comments_30579499)
+
 ## 1. 结构体关系
 
 ```plantuml
@@ -17,30 +24,40 @@ class socket {
 
 class proto_ops {}
 
-class inet_stream_ops implements proto_ops {}
+class inet_stream_ops {}
+inet_stream_ops .up.|> proto_ops: 实现
 
 class sock {
 	sk_state => __sk_common.skc_state
     sk_prot => __sk_common.skc_prot
 }
-class inet_sock implements sock {
+class inet_sock {
     struct sock sk;
 }
-class inet_connection_sock implements inet_sock {
+inet_sock .up.|> sock: inet_sock前面就是sock结构体
+class inet_connection_sock  {
 	struct inet_sock	  icsk_inet;
 	const struct inet_connection_sock_af_ops *icsk_af_ops;
 }
+inet_connection_sock .up.|> inet_sock: inet_connection_sock前面就是inet_sock结构体
+class tcp_sock  {
+	struct inet_connection_sock	inet_conn;
+}
+tcp_sock .up.|> inet_connection_sock: tcp_sock前面就是inet_connection_sock结构体
 
 class sk_prot {}
-class tcp_prot implements sk_prot {}
+class tcp_prot {}
+tcp_prot .up.|> sk_prot: 实现
 
-sock <|-- sk_prot
-socket <|-- proto_ops
-socket <|-- sock
+sock <|-- sk_prot: 持有
+socket <|-- proto_ops: 持有
+socket <|-- sock: 持有
 
 class icsk_af_ops {}
-class ipv4_specific implements icsk_af_ops {}
-inet_connection_sock <|-- icsk_af_ops
+class ipv4_specific {}
+ipv4_specific .up.|> icsk_af_ops: 实现
+
+inet_connection_sock <|-- icsk_af_ops: 持有
 
 @enduml
 ```
@@ -87,14 +104,30 @@ int inet_csk_listen_start(struct sock *sk)
 @startuml 服务端数据传输socket
 
 [*] --> TCP_NEW_SYN_RECV
+
 TCP_LISTEN --> TCP_NEW_SYN_RECV : listen的socket收到syn包创建了新的socket
-TCP_NEW_SYN_RECV --> TCP_SYN_RECV : 收到包先转此状态
 note left of TCP_NEW_SYN_RECV
 因为TCP_SYN_RECV被fast open占用了
 使用了一个新的状态表示
+新的状态给request_sock结构体使用
 到此状态后发送一个syn/ack包回去
 end note
-TCP_SYN_RECV --> TCP_ESTABLISHED : 收到的是ack转此状态
+
+TCP_NEW_SYN_RECV --> TCP_SYN_RECV : 收到包
+note left of TCP_SYN_RECV
+此前创建的request_sock是个minisock
+确认收包要建立连接，创建完整的sock结构体
+完整的sock状态直接为TCP_SYN_RECV
+end note
+
+TCP_SYN_RECV --> TCP_ESTABLISHED : 确认是ack包，转此状态
+
+TCP_FIN_WAIT2 -> TCP_TIME_WAIT : 收到fin包，回复ack
+note bottom of TCP_TIME_WAIT
+进入TCP_TIME_WAIT状态不需要完整sock结构体
+创建inet_timewait_sock接管TCP_TIME_WAIT
+原始sock直接关闭，转TCP_CLOSE
+end note
 
 @enduml
 ```
@@ -361,7 +394,7 @@ static int tcp_v4_send_synack(const struct sock *sk, struct dst_entry *dst,
 }
 ```
 
-#### 2) TCP_NEW_SYN_RECV 发送了syn/ack后收到包处理
+#### 2) TCP_NEW_SYN_RECV 发送了syn/ack后收到ACK包处理
 
 ##### (1) 收包处理
 
@@ -471,7 +504,7 @@ struct sock *tcp_v4_syn_recv_sock(const struct sock *sk, struct sk_buff *skb,
 }
 ```
 
-- 创建新的socket替换`request_sock`
+- 创建新的socket替换`request_sock`，状态直接为`TCP_SYN_RECV`
 
 ```cpp
 // net/ipv4/tcp_minisocks.c
@@ -500,6 +533,7 @@ struct sock *inet_csk_clone_lock(const struct sock *sk,
 	if (newsk) {
 		struct inet_connection_sock *newicsk = inet_csk(newsk);
 
+		// 创建完整的sock，状态为TCP_SYN_RECV
 		inet_sk_set_state(newsk, TCP_SYN_RECV);
 		newicsk->icsk_bind_hash = NULL;
 
@@ -734,9 +768,9 @@ int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 }
 ```
 
-## 2. TCP_CLOSE状态
+### 1.4. TCP_CLOSE状态
 
-### 2.1. 初始化
+#### 1) 初始化
 
 ```cpp
 // net/core/sock.c
@@ -750,11 +784,217 @@ void sock_init_data(struct socket *sock, struct sock *sk)
 EXPORT_SYMBOL(sock_init_data);
 ```
 
+#### 2) TCP_FIN_WAIT2到TCP_TIME_WAIT，原始sock转成TCP_CLOSE
+
+```cpp
+// net/ipv4/tcp_input.c
+static void tcp_data_queue(struct sock *sk, struct sk_buff *skb)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	...
+	/*  Queue data for delivery to the user.
+	 *  Packets in sequence go to the receive queue.
+	 *  Out of sequence packets to the out_of_order_queue.
+	 */
+	if (TCP_SKB_CB(skb)->seq == tp->rcv_nxt) {
+		...
+		if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN)
+			tcp_fin(sk);
+		...
+		return;
+	}
+	...
+}
+
+// net/ipv4/tcp_input.c
+/*
+ * 	Process the FIN bit. This now behaves as it is supposed to work
+ *	and the FIN takes effect when it is validly part of sequence
+ *	space. Not before when we get holes.
+ *
+ *	If we are ESTABLISHED, a received fin moves us to CLOSE-WAIT
+ *	(and thence onto LAST-ACK and finally, CLOSE, we never enter
+ *	TIME-WAIT)
+ *
+ *	If we are in FINWAIT-1, a received FIN indicates simultaneous
+ *	close and we go into CLOSING (and later onto TIME-WAIT)
+ *
+ *	If we are in FINWAIT-2, a received FIN moves us to TIME-WAIT.
+ */
+void tcp_fin(struct sock *sk)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	...
+	switch (sk->sk_state) {
+		...
+	case TCP_FIN_WAIT2:
+		/* Received a FIN -- send ACK and enter TIME_WAIT. */
+		tcp_send_ack(sk);
+		tcp_time_wait(sk, TCP_TIME_WAIT, 0);
+		break;
+		...
+	}
+	...
+}
+
+// net/ipv4/tcp_minisocks.c
+/*
+ * Move a socket to time-wait or dead fin-wait-2 state.
+ */
+void tcp_time_wait(struct sock *sk, int state, int timeo)
+{
+	const struct inet_connection_sock *icsk = inet_csk(sk);
+	const struct tcp_sock *tp = tcp_sk(sk);
+	struct inet_timewait_sock *tw;
+	struct inet_timewait_death_row *tcp_death_row = sock_net(sk)->ipv4.tcp_death_row;
+
+	tw = inet_twsk_alloc(sk, tcp_death_row, state);
+	...
+	tcp_update_metrics(sk);
+	tcp_done(sk);
+}
+EXPORT_SYMBOL(tcp_time_wait);
+```
+
+- 原始sock结构体sk转成`TCP_CLOSE`状态，使用`inet_timewait_sock`的minisock接管`TCP_TIME_WAIT`状态
+
+```cpp
+// net/ipv4/inet_timewait_sock.c
+struct inet_timewait_sock *inet_twsk_alloc(const struct sock *sk,
+					   struct inet_timewait_death_row *dr,
+					   const int state)
+{
+	struct inet_timewait_sock *tw;
+
+	if (refcount_read(&dr->tw_refcount) - 1 >=
+	    READ_ONCE(dr->sysctl_max_tw_buckets))
+		return NULL;
+
+	tw = kmem_cache_alloc(sk->sk_prot_creator->twsk_prot->twsk_slab,
+			      GFP_ATOMIC);
+	if (tw) {
+		const struct inet_sock *inet = inet_sk(sk);
+
+		tw->tw_dr	    = dr;
+		/* Give us an identity. */
+		tw->tw_daddr	    = inet->inet_daddr;
+		tw->tw_rcv_saddr    = inet->inet_rcv_saddr;
+		tw->tw_bound_dev_if = sk->sk_bound_dev_if;
+		tw->tw_tos	    = inet->tos;
+		tw->tw_num	    = inet->inet_num;
+		tw->tw_state	    = TCP_TIME_WAIT;
+		tw->tw_substate	    = state;
+		tw->tw_sport	    = inet->inet_sport;
+		tw->tw_dport	    = inet->inet_dport;
+		tw->tw_family	    = sk->sk_family;
+		tw->tw_reuse	    = sk->sk_reuse;
+		tw->tw_reuseport    = sk->sk_reuseport;
+		tw->tw_hash	    = sk->sk_hash;
+		tw->tw_ipv6only	    = 0;
+		tw->tw_transparent  = inet->transparent;
+		tw->tw_prot	    = sk->sk_prot_creator;
+		atomic64_set(&tw->tw_cookie, atomic64_read(&sk->sk_cookie));
+		twsk_net_set(tw, sock_net(sk));
+		timer_setup(&tw->tw_timer, tw_timer_handler, TIMER_PINNED);
+		/*
+		 * Because we use RCU lookups, we should not set tw_refcnt
+		 * to a non null value before everything is setup for this
+		 * timewait socket.
+		 */
+		refcount_set(&tw->tw_refcnt, 0);
+
+		__module_get(tw->tw_prot->owner);
+	}
+
+	return tw;
+}
+EXPORT_SYMBOL_GPL(inet_twsk_alloc);
+
+// net/ipv4/tcp.c
+void tcp_done(struct sock *sk)
+{
+	struct request_sock *req;
+
+	/* We might be called with a new socket, after
+	 * inet_csk_prepare_forced_close() has been called
+	 * so we can not use lockdep_sock_is_held(sk)
+	 */
+	req = rcu_dereference_protected(tcp_sk(sk)->fastopen_rsk, 1);
+
+	if (sk->sk_state == TCP_SYN_SENT || sk->sk_state == TCP_SYN_RECV)
+		TCP_INC_STATS(sock_net(sk), TCP_MIB_ATTEMPTFAILS);
+
+	tcp_set_state(sk, TCP_CLOSE);
+	tcp_clear_xmit_timers(sk);
+	if (req)
+		reqsk_fastopen_remove(sk, req, false);
+
+	sk->sk_shutdown = SHUTDOWN_MASK;
+
+	if (!sock_flag(sk, SOCK_DEAD))
+		sk->sk_state_change(sk);
+	else
+		inet_csk_destroy_sock(sk);
+}
+EXPORT_SYMBOL_GPL(tcp_done);
+```
+
+## 2. 数据包构造
+
+### 2.1. syn包
+
+- connect发包到OUTPUT链的堆栈
+
+```cpp
+/*
+__ip_local_out(struct net * net, struct sock * sk, struct sk_buff * skb) (net/ipv4/ip_output.c:103)
+ip_local_out(struct net * net, struct sock * sk, struct sk_buff * skb) (net/ipv4/ip_output.c:124)
+__ip_queue_xmit(struct sock * sk, struct sk_buff * skb, struct flowi * fl, __u8 tos) (net/ipv4/ip_output.c:532)
+ip_queue_xmit(struct sock * sk, struct sk_buff * skb, struct flowi * fl) (net/ipv4/ip_output.c:546)
+__tcp_transmit_skb(struct sock * sk, struct sk_buff * skb, int clone_it, gfp_t gfp_mask, u32 rcv_nxt) (net/ipv4/tcp_output.c:1402)
+tcp_transmit_skb(gfp_t gfp_mask, int clone_it, struct sk_buff * skb, struct sock * sk) (net/ipv4/tcp_output.c:1420)
+tcp_connect(struct sock * sk) (net/ipv4/tcp_output.c:3853)
+tcp_v4_connect(struct sock * sk, struct sockaddr * uaddr, int addr_len) (net/ipv4/tcp_ipv4.c:313)
+__inet_stream_connect(struct socket * sock, struct sockaddr * uaddr, int addr_len, int flags, int is_sendmsg) (net/ipv4/af_inet.c:660)
+inet_stream_connect(struct socket * sock, struct sockaddr * uaddr, int addr_len, int flags) (net/ipv4/af_inet.c:724)
+__sys_connect(int fd, struct sockaddr * uservaddr, int addrlen) (net/socket.c:1996)
+__do_sys_connect(int addrlen, struct sockaddr * uservaddr, int fd) (net/socket.c:2006)
+__se_sys_connect(long addrlen, long uservaddr, long fd) (net/socket.c:2003)
+__x64_sys_connect(const struct pt_regs * regs) (net/socket.c:2003)
+do_syscall_x64(int nr, struct pt_regs * regs) (arch/x86/entry/common.c:50)
+do_syscall_64(struct pt_regs * regs, int nr) (arch/x86/entry/common.c:80)
+entry_SYSCALL_64() (arch/x86/entry/entry_64.S:120)
+[Unknown/Just-In-Time compiled code] (Unknown Source:0)
+fixed_percpu_data (Unknown Source:0)
+[Unknown/Just-In-Time compiled code] (Unknown Source:0)
+*/
+int __ip_local_out(struct net *net, struct sock *sk, struct sk_buff *skb)
+{
+	struct iphdr *iph = ip_hdr(skb);
+
+	iph->tot_len = htons(skb->len);
+	ip_send_check(iph);
+
+	/* if egress device is enslaved to an L3 master device pass the
+	 * skb to its handler for processing
+	 */
+	skb = l3mdev_ip_out(sk, skb);
+	if (unlikely(!skb))
+		return 0;
+
+	skb->protocol = htons(ETH_P_IP);
+
+	return nf_hook(NFPROTO_IPV4, NF_INET_LOCAL_OUT,
+		       net, sk, skb, NULL, skb_dst(skb)->dev,
+		       dst_output);
+}
+```
+
 # 三、几个异常场景的源码解释
 
 ## 1. 向一个服务器没有监听的端口发送syn包，会收到rst
 
-- 先看[ipv4收包过程](/docs/linux-kernel/net/ipv4/ipv4/#%E4%BA%8Cipv4%E6%94%B6%E5%8C%85%E5%90%8E%E5%A6%82%E4%BD%95%E5%A4%84%E7%90%86)，tcp处理函数为`tcp_v4_rcv`
+- 先看[ipv4收包过程](/docs/linux/linux-kernel/net/ipv4/ipv4/#%E4%BA%8Cipv4%E6%94%B6%E5%8C%85%E5%90%8E%E5%A6%82%E4%BD%95%E5%A4%84%E7%90%86)，tcp处理函数为`tcp_v4_rcv`
 
 ```cpp
 // net/ipv4/tcp_ipv4.c
@@ -2003,3 +2243,484 @@ static int tcp_v4_init_sock(struct sock *sk)
 	return 0;
 }
 ```
+
+# 六、tcp options
+
+## 1. 什么是tcp options
+
+![](imgs/2023-12-12-01.png)
+
+- tcp头部固定长度为20字节，最大为60字节，此包为40字节，多出来的20字节就是Options
+- options满足tlv格式，其中length包含kind、length本身（固定一个字节）、value的总长度
+- tcp options相关定义
+
+```cpp
+// include/net/tcp.h
+/*
+ *	TCP option
+ */
+// 写入到tcp option的kind字段中的值
+#define TCPOPT_NOP		1	/* Padding */
+#define TCPOPT_EOL		0	/* End of options */
+#define TCPOPT_MSS		2	/* Segment size negotiating */
+#define TCPOPT_WINDOW		3	/* Window scaling */
+#define TCPOPT_SACK_PERM        4       /* SACK Permitted */
+#define TCPOPT_SACK             5       /* SACK Block */
+#define TCPOPT_TIMESTAMP	8	/* Better RTT estimations/PAWS */
+#define TCPOPT_MD5SIG		19	/* MD5 Signature (RFC2385) */
+#define TCPOPT_FASTOPEN		34	/* Fast open (RFC7413) */
+#define TCPOPT_EXP		254	/* Experimental */
+/* Magic number to be after the option value for sharing TCP
+ * experimental options. See draft-ietf-tcpm-experimental-options-00.txt
+ */
+#define TCPOPT_FASTOPEN_MAGIC	0xF989
+#define TCPOPT_SMC_MAGIC	0xE2D4C3D9
+
+/*
+ *     TCP option lengths
+ */
+// 对应tcp option的长度，写入到tcp option的len中，包含kind、len、value长度
+#define TCPOLEN_MSS            4
+#define TCPOLEN_WINDOW         3
+#define TCPOLEN_SACK_PERM      2
+#define TCPOLEN_TIMESTAMP      10
+#define TCPOLEN_MD5SIG         18
+#define TCPOLEN_FASTOPEN_BASE  2
+#define TCPOLEN_EXP_FASTOPEN_BASE  4
+#define TCPOLEN_EXP_SMC_BASE   6
+
+/* But this is what stacks really send out. */
+// 这个是用于占位，是len的4字节对齐后的长度，不足的会在前面使用TCPOPT_NOP添加Padding
+#define TCPOLEN_TSTAMP_ALIGNED		12
+#define TCPOLEN_WSCALE_ALIGNED		4
+#define TCPOLEN_SACKPERM_ALIGNED	4
+#define TCPOLEN_SACK_BASE		2
+#define TCPOLEN_SACK_BASE_ALIGNED	4
+#define TCPOLEN_SACK_PERBLOCK		8
+#define TCPOLEN_MD5SIG_ALIGNED		20
+#define TCPOLEN_MSS_ALIGNED		4
+#define TCPOLEN_EXP_SMC_BASE_ALIGNED	8
+```
+
+## 2. tcp options在内核中如何生成的
+
+tcp发送数据包的函数为`tcp_transmit_skb`
+
+```cpp
+// net/ipv4/tcp_output.c
+static int tcp_transmit_skb(struct sock *sk, struct sk_buff *skb, int clone_it,
+			    gfp_t gfp_mask)
+{
+	return __tcp_transmit_skb(sk, skb, clone_it, gfp_mask,
+				  tcp_sk(sk)->rcv_nxt);
+}
+```
+
+- 构造数据包的过程中会计算头部保留一部分空间给`tcp_options`
+
+```cpp
+// net/ipv4/tcp_output.c
+/* This routine actually transmits TCP packets queued in by
+ * tcp_do_sendmsg().  This is used by both the initial
+ * transmission and possible later retransmissions.
+ * All SKB's seen here are completely headerless.  It is our
+ * job to build the TCP header, and pass the packet down to
+ * IP so it can do the same plus pass the packet off to the
+ * device.
+ *
+ * We are working here with either a clone of the original
+ * SKB, or a fresh unique copy made by the retransmit engine.
+ */
+static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
+			      int clone_it, gfp_t gfp_mask, u32 rcv_nxt)
+{
+	...
+	struct tcp_out_options opts;
+	unsigned int tcp_options_size, tcp_header_size;
+    ...
+	memset(&opts, 0, sizeof(opts));
+
+	if (unlikely(tcb->tcp_flags & TCPHDR_SYN)) {
+		tcp_options_size = tcp_syn_options(sk, skb, &opts, &md5);
+	} else {
+		tcp_options_size = tcp_established_options(sk, skb, &opts,
+							   &md5);
+		/* Force a PSH flag on all (GSO) packets to expedite GRO flush
+		 * at receiver : This slightly improve GRO performance.
+		 * Note that we do not force the PSH flag for non GSO packets,
+		 * because they might be sent under high congestion events,
+		 * and in this case it is better to delay the delivery of 1-MSS
+		 * packets and thus the corresponding ACK packet that would
+		 * release the following packet.
+		 */
+		if (tcp_skb_pcount(skb) > 1)
+			tcb->tcp_flags |= TCPHDR_PSH;
+	}
+	tcp_header_size = tcp_options_size + sizeof(struct tcphdr);
+    ...
+	skb_push(skb, tcp_header_size);
+	skb_reset_transport_header(skb);
+
+	skb_orphan(skb);
+	skb->sk = sk;
+	skb->destructor = skb_is_tcp_pure_ack(skb) ? __sock_wfree : tcp_wfree;
+	refcount_add(skb->truesize, &sk->sk_wmem_alloc);
+
+	skb_set_dst_pending_confirm(skb, sk->sk_dst_pending_confirm);
+
+    // 构造tcp头部信息
+	/* Build TCP header and checksum it. */
+	th = (struct tcphdr *)skb->data;
+	th->source		= inet->inet_sport;
+	th->dest		= inet->inet_dport;
+	th->seq			= htonl(tcb->seq);
+	th->ack_seq		= htonl(rcv_nxt);
+	*(((__be16 *)th) + 6)	= htons(((tcp_header_size >> 2) << 12) |
+					tcb->tcp_flags);
+
+	th->check		= 0;
+	th->urg_ptr		= 0;
+    ...
+	tcp_options_write(th, tp, &opts);
+    ...
+	/* BPF prog is the last one writing header option */
+	bpf_skops_write_hdr_opt(sk, skb, NULL, NULL, 0, &opts);
+    ...
+    // 添加到发送队列
+	tcp_add_tx_delay(skb, tp);
+
+	err = INDIRECT_CALL_INET(icsk->icsk_af_ops->queue_xmit,
+				 inet6_csk_xmit, ip_queue_xmit,
+				 sk, skb, &inet->cork.fl);
+
+	if (unlikely(err > 0)) {
+		tcp_enter_cwr(sk);
+		err = net_xmit_eval(err);
+	}
+	if (!err && oskb) {
+		tcp_update_skb_after_send(sk, oskb, prior_wstamp);
+		tcp_rate_skb_sent(sk, oskb);
+	}
+	return err;
+}
+```
+
+- `tcp_options_write`用于写入options
+- 上面的计算options头部大小分为两个阶段，一个是syn包，一个是建立时，也就是三次握手的最后一个ack包
+- bpf存在接口可以进行添加options，但是bpf的这个接口仅在高版本内核存在，4.19.181内核没有
+- 先看tcp option的定义
+
+```cpp
+// net/ipv4/tcp_output.c
+// 这个只是定义在OPTIONS的bit位，非tcp option中的kind
+#define OPTION_SACK_ADVERTISE	BIT(0)
+#define OPTION_TS		BIT(1)
+#define OPTION_MD5		BIT(2)
+#define OPTION_WSCALE		BIT(3)
+#define OPTION_FAST_OPEN_COOKIE	BIT(8)
+#define OPTION_SMC		BIT(9)
+#define OPTION_MPTCP		BIT(10)
+...
+struct tcp_out_options {
+	u16 options;		/* bit field of OPTION_* */
+	u16 mss;		/* 0 to disable */
+	u8 ws;			/* window scale, 0 to disable */
+	u8 num_sack_blocks;	/* number of SACK blocks to include */
+	u8 hash_size;		/* bytes in hash_location */
+	u8 bpf_opt_len;		/* length of BPF hdr option */
+	__u8 *hash_location;	/* temporary pointer, overloaded */
+	__u32 tsval, tsecr;	/* need to include OPTION_TS */
+	struct tcp_fastopen_cookie *fastopen_cookie;	/* Fast open cookie */
+	struct mptcp_out_options mptcp;
+};
+```
+
+- 查看设置tcp option的地方
+
+```cpp
+// include/net/tcp.h
+#define MAX_TCP_OPTION_SPACE 40
+
+// net/ipv4/tcp_output.c
+/* Compute TCP options for SYN packets. This is not the final
+ * network wire format yet.
+ */
+// 返回options占用了多少字节
+static unsigned int tcp_syn_options(struct sock *sk, struct sk_buff *skb,
+				struct tcp_out_options *opts,
+				struct tcp_md5sig_key **md5)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	unsigned int remaining = MAX_TCP_OPTION_SPACE;
+	struct tcp_fastopen_request *fastopen = tp->fastopen_req;
+
+	*md5 = NULL;
+#ifdef CONFIG_TCP_MD5SIG
+	if (static_branch_unlikely(&tcp_md5_needed) &&
+	    rcu_access_pointer(tp->md5sig_info)) {
+		*md5 = tp->af_specific->md5_lookup(sk, sk);
+		if (*md5) {
+			opts->options |= OPTION_MD5;
+			remaining -= TCPOLEN_MD5SIG_ALIGNED;
+		}
+	}
+#endif
+
+	/* We always get an MSS option.  The option bytes which will be seen in
+	 * normal data packets should timestamps be used, must be in the MSS
+	 * advertised.  But we subtract them from tp->mss_cache so that
+	 * calculations in tcp_sendmsg are simpler etc.  So account for this
+	 * fact here if necessary.  If we don't do this correctly, as a
+	 * receiver we won't recognize data packets as being full sized when we
+	 * should, and thus we won't abide by the delayed ACK rules correctly.
+	 * SACKs don't matter, we never delay an ACK when we have any of those
+	 * going out.  */
+	opts->mss = tcp_advertise_mss(sk);
+	remaining -= TCPOLEN_MSS_ALIGNED;
+
+	if (likely(READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_timestamps) && !*md5)) {
+		opts->options |= OPTION_TS;
+		opts->tsval = tcp_skb_timestamp(skb) + tp->tsoffset;
+		opts->tsecr = tp->rx_opt.ts_recent;
+		remaining -= TCPOLEN_TSTAMP_ALIGNED;
+	}
+	if (likely(READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_window_scaling))) {
+		opts->ws = tp->rx_opt.rcv_wscale;
+		opts->options |= OPTION_WSCALE;
+		remaining -= TCPOLEN_WSCALE_ALIGNED;
+	}
+	if (likely(READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_sack))) {
+		opts->options |= OPTION_SACK_ADVERTISE;
+		if (unlikely(!(OPTION_TS & opts->options)))
+			remaining -= TCPOLEN_SACKPERM_ALIGNED;
+	}
+
+	if (fastopen && fastopen->cookie.len >= 0) {
+		u32 need = fastopen->cookie.len;
+
+		need += fastopen->cookie.exp ? TCPOLEN_EXP_FASTOPEN_BASE :
+					       TCPOLEN_FASTOPEN_BASE;
+		need = (need + 3) & ~3U;  /* Align to 32 bits */
+		if (remaining >= need) {
+			opts->options |= OPTION_FAST_OPEN_COOKIE;
+			opts->fastopen_cookie = &fastopen->cookie;
+			remaining -= need;
+			tp->syn_fastopen = 1;
+			tp->syn_fastopen_exp = fastopen->cookie.exp ? 1 : 0;
+		}
+	}
+
+	smc_set_option(tp, opts, &remaining);
+
+	if (sk_is_mptcp(sk)) {
+		unsigned int size;
+
+		if (mptcp_syn_options(sk, skb, &size, &opts->mptcp)) {
+			opts->options |= OPTION_MPTCP;
+			remaining -= size;
+		}
+	}
+
+	bpf_skops_hdr_opt_len(sk, skb, NULL, NULL, 0, opts, &remaining);
+
+	return MAX_TCP_OPTION_SPACE - remaining;
+}
+```
+
+```cpp
+/* Compute TCP options for ESTABLISHED sockets. This is not the
+ * final wire format yet.
+ */
+static unsigned int tcp_established_options(struct sock *sk, struct sk_buff *skb,
+					struct tcp_out_options *opts,
+					struct tcp_md5sig_key **md5)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	unsigned int size = 0;
+	unsigned int eff_sacks;
+
+	opts->options = 0;
+
+	*md5 = NULL;
+#ifdef CONFIG_TCP_MD5SIG
+	if (static_branch_unlikely(&tcp_md5_needed) &&
+	    rcu_access_pointer(tp->md5sig_info)) {
+		*md5 = tp->af_specific->md5_lookup(sk, sk);
+		if (*md5) {
+			opts->options |= OPTION_MD5;
+			size += TCPOLEN_MD5SIG_ALIGNED;
+		}
+	}
+#endif
+
+	if (likely(tp->rx_opt.tstamp_ok)) {
+		opts->options |= OPTION_TS;
+		opts->tsval = skb ? tcp_skb_timestamp(skb) + tp->tsoffset : 0;
+		opts->tsecr = tp->rx_opt.ts_recent;
+		size += TCPOLEN_TSTAMP_ALIGNED;
+	}
+
+	/* MPTCP options have precedence over SACK for the limited TCP
+	 * option space because a MPTCP connection would be forced to
+	 * fall back to regular TCP if a required multipath option is
+	 * missing. SACK still gets a chance to use whatever space is
+	 * left.
+	 */
+	if (sk_is_mptcp(sk)) {
+		unsigned int remaining = MAX_TCP_OPTION_SPACE - size;
+		unsigned int opt_size = 0;
+
+		if (mptcp_established_options(sk, skb, &opt_size, remaining,
+					      &opts->mptcp)) {
+			opts->options |= OPTION_MPTCP;
+			size += opt_size;
+		}
+	}
+
+	eff_sacks = tp->rx_opt.num_sacks + tp->rx_opt.dsack;
+	if (unlikely(eff_sacks)) {
+		const unsigned int remaining = MAX_TCP_OPTION_SPACE - size;
+		if (unlikely(remaining < TCPOLEN_SACK_BASE_ALIGNED +
+					 TCPOLEN_SACK_PERBLOCK))
+			return size;
+
+		opts->num_sack_blocks =
+			min_t(unsigned int, eff_sacks,
+			      (remaining - TCPOLEN_SACK_BASE_ALIGNED) /
+			      TCPOLEN_SACK_PERBLOCK);
+
+		size += TCPOLEN_SACK_BASE_ALIGNED +
+			opts->num_sack_blocks * TCPOLEN_SACK_PERBLOCK;
+	}
+
+	if (unlikely(BPF_SOCK_OPS_TEST_FLAG(tp,
+					    BPF_SOCK_OPS_WRITE_HDR_OPT_CB_FLAG))) {
+		unsigned int remaining = MAX_TCP_OPTION_SPACE - size;
+
+		bpf_skops_hdr_opt_len(sk, skb, NULL, NULL, 0, opts, &remaining);
+
+		size = MAX_TCP_OPTION_SPACE - remaining;
+	}
+
+	return size;
+}
+```
+
+- 写options的函数
+
+```cpp
+/* Write previously computed TCP options to the packet.
+ *
+ * Beware: Something in the Internet is very sensitive to the ordering of
+ * TCP options, we learned this through the hard way, so be careful here.
+ * Luckily we can at least blame others for their non-compliance but from
+ * inter-operability perspective it seems that we're somewhat stuck with
+ * the ordering which we have been using if we want to keep working with
+ * those broken things (not that it currently hurts anybody as there isn't
+ * particular reason why the ordering would need to be changed).
+ *
+ * At least SACK_PERM as the first option is known to lead to a disaster
+ * (but it may well be that other scenarios fail similarly).
+ */
+static void tcp_options_write(struct tcphdr *th, struct tcp_sock *tp,
+			      struct tcp_out_options *opts)
+{
+	__be32 *ptr = (__be32 *)(th + 1);
+	u16 options = opts->options;	/* mungable copy */
+
+	if (unlikely(OPTION_MD5 & options)) {
+		*ptr++ = htonl((TCPOPT_NOP << 24) | (TCPOPT_NOP << 16) |
+			       (TCPOPT_MD5SIG << 8) | TCPOLEN_MD5SIG);
+		/* overload cookie hash location */
+		opts->hash_location = (__u8 *)ptr;
+		ptr += 4;
+	}
+
+	if (unlikely(opts->mss)) {
+		*ptr++ = htonl((TCPOPT_MSS << 24) |
+			       (TCPOLEN_MSS << 16) |
+			       opts->mss);
+	}
+
+	if (likely(OPTION_TS & options)) {
+		if (unlikely(OPTION_SACK_ADVERTISE & options)) {
+			*ptr++ = htonl((TCPOPT_SACK_PERM << 24) |
+				       (TCPOLEN_SACK_PERM << 16) |
+				       (TCPOPT_TIMESTAMP << 8) |
+				       TCPOLEN_TIMESTAMP);
+			options &= ~OPTION_SACK_ADVERTISE;
+		} else {
+			*ptr++ = htonl((TCPOPT_NOP << 24) |
+				       (TCPOPT_NOP << 16) |
+				       (TCPOPT_TIMESTAMP << 8) |
+				       TCPOLEN_TIMESTAMP);
+		}
+		*ptr++ = htonl(opts->tsval);
+		*ptr++ = htonl(opts->tsecr);
+	}
+
+	if (unlikely(OPTION_SACK_ADVERTISE & options)) {
+		*ptr++ = htonl((TCPOPT_NOP << 24) |
+			       (TCPOPT_NOP << 16) |
+			       (TCPOPT_SACK_PERM << 8) |
+			       TCPOLEN_SACK_PERM);
+	}
+
+	if (unlikely(OPTION_WSCALE & options)) {
+		*ptr++ = htonl((TCPOPT_NOP << 24) |
+			       (TCPOPT_WINDOW << 16) |
+			       (TCPOLEN_WINDOW << 8) |
+			       opts->ws);
+	}
+
+	if (unlikely(opts->num_sack_blocks)) {
+		struct tcp_sack_block *sp = tp->rx_opt.dsack ?
+			tp->duplicate_sack : tp->selective_acks;
+		int this_sack;
+
+		*ptr++ = htonl((TCPOPT_NOP  << 24) |
+			       (TCPOPT_NOP  << 16) |
+			       (TCPOPT_SACK <<  8) |
+			       (TCPOLEN_SACK_BASE + (opts->num_sack_blocks *
+						     TCPOLEN_SACK_PERBLOCK)));
+
+		for (this_sack = 0; this_sack < opts->num_sack_blocks;
+		     ++this_sack) {
+			*ptr++ = htonl(sp[this_sack].start_seq);
+			*ptr++ = htonl(sp[this_sack].end_seq);
+		}
+
+		tp->rx_opt.dsack = 0;
+	}
+
+	if (unlikely(OPTION_FAST_OPEN_COOKIE & options)) {
+		struct tcp_fastopen_cookie *foc = opts->fastopen_cookie;
+		u8 *p = (u8 *)ptr;
+		u32 len; /* Fast Open option length */
+
+		if (foc->exp) {
+			len = TCPOLEN_EXP_FASTOPEN_BASE + foc->len;
+			*ptr = htonl((TCPOPT_EXP << 24) | (len << 16) |
+				     TCPOPT_FASTOPEN_MAGIC);
+			p += TCPOLEN_EXP_FASTOPEN_BASE;
+		} else {
+			len = TCPOLEN_FASTOPEN_BASE + foc->len;
+			*p++ = TCPOPT_FASTOPEN;
+			*p++ = len;
+		}
+
+		memcpy(p, foc->val, foc->len);
+		if ((len & 3) == 2) {
+			p[foc->len] = TCPOPT_NOP;
+			p[foc->len + 1] = TCPOPT_NOP;
+		}
+		ptr += (len + 3) >> 2;
+	}
+
+	smc_options_write(ptr, &options);
+
+	mptcp_options_write(th, ptr, tp, opts);
+}
+```
+
+- 实现上都是每个option按照4字节对齐，不足补充NOP

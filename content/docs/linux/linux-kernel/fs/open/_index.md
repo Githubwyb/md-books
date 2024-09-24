@@ -3,6 +3,10 @@ weight: 3
 title: "open系统调用"
 ---
 
+[open()在Linux内核的实现(2)-路径查找](http://edsionte.com/techblog/archives/4476)
+[详解应用层open函数如何调用到底层驱动中xxx_open函数](https://blog.csdn.net/u012142460/article/details/78932165)
+[打开一个文件操作系统做了什么？](https://blog.csdn.net/weixin_43408374/article/details/104770835)
+
 # 一、总述
 
 # 二、代码流程

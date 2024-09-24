@@ -259,8 +259,7 @@ static int skf_load_ssl_client_cert(ENGINE* e, SSL* ssl, STACK_OF(X509_NAME) * c
                                     STACK_OF(X509) * *pother, UI_METHOD* ui_method, void* callback_data);
 ```
 
-- 一个简单的软件实现代码如下，从文件中读取证书给到引擎
-- 使用ukey的话，这里就只能到处证书和公钥，私钥无法导出
+#### 1) 一个简单的软件实现代码如下，从文件中读取证书给到引擎
 
 ```cpp
 /**
@@ -298,7 +297,158 @@ static int skf_load_ssl_client_cert(ENGINE* e, SSL* ssl, STACK_OF(X509_NAME) * c
 }
 ```
 
-## 3. 私钥签名
+#### 2) ukey中读证书
+
+- 使用ukey的话，这里就只能导出证书和公钥，私钥无法导出
+
+```cpp
+// 将导出的公钥结构体设置到rsa结构体的公钥部分
+int RSA_set_RSAPUBLICKEYBLOB(RSA *rsa, const RSAPUBLICKEYBLOB *blob)
+{
+	int ret = 0;
+	BIGNUM *n = NULL;
+	BIGNUM *e = NULL;
+
+	if (!rsa || !blob) {
+        LOG_ERROR(Tag, "!rsa || !blob");
+		return 0;
+	}
+
+	if ((blob->BitLen < OPENSSL_RSA_FIPS_MIN_MODULUS_BITS)
+		|| (blob->BitLen > sizeof(blob->Modulus) * 8)
+		|| (blob->BitLen % 8 != 0)) {
+        LOG_ERROR(Tag, "blob->BitLen < OPENSSL_RSA_FIPS_MIN_MODULUS_BITS");
+		return 0;
+	}
+
+    // 导出两个大质数的乘积n
+	if (!(n = BN_bin2bn(blob->Modulus, sizeof(blob->Modulus), NULL))) {
+        LOG_ERROR(Tag, "n = BN_bin2bn(blob->Modulus, sizeof(blob->Modulus), NULL)");
+		goto end;
+	}
+
+    // 导出公钥的e
+	if (!(e = BN_bin2bn(blob->PublicExponent,
+		sizeof(blob->PublicExponent), NULL))) {
+        LOG_ERROR(Tag, "e = BN_bin2bn(blob->PublicExponent");
+		goto end;
+	}
+
+    // 设置rsa的n和e，对应的是rsa算法的公钥部分
+	if (!RSA_set0_key(rsa, n, e, NULL)) {
+        LOG_ERROR(Tag, "RSA_set0_key(rsa, n, e, NULL)");
+		goto end;
+	}
+	n = NULL;
+	e = NULL;
+
+	ret = 1;
+
+end:
+	BN_free(n);
+	BN_free(e);
+	return ret;
+}
+
+static int skf_load_rsa_client_cert(X509** pcert, EVP_PKEY** ppkey) {
+    const char* operation = "load rsa client cert";
+    RSAPUBLICKEYBLOB pubKey = {0};
+    EVP_PKEY* pkey = NULL;
+    RSA* r = NULL;
+    int iResult = 0;
+    unsigned char certContetBITS[8192] = {0};
+    ULONG ulCertLen = sizeof(certContetBITS);
+    BIO* b = NULL;
+
+    LOG_INFO(Tag, "%s", operation);
+    do {
+        if ((pkey = EVP_PKEY_new()) == NULL) {
+            LOG_ERROR(Tag, "[%s] new EVP_PKEY failed", operation);
+            break;
+        }
+
+        // 导出公钥写入算法结构体
+        if (exportPublicKey(TRUE, reinterpret_cast<unsigned char*>(&pubKey), sizeof(pubKey)) < 0) {
+            LOG_ERROR(Tag, "[%s] export public key from skf failed", operation);
+            break;
+        }
+        LOG_INFO(Tag, "export public key success");
+
+        if ((r = RSA_new()) == NULL) {
+            LOG_ERROR(Tag, "[%s] new RSA failed", operation);
+            break;
+        }
+
+        if (!RSA_set_RSAPUBLICKEYBLOB(r, &pubKey)) {
+            LOG_ERROR(Tag, "[%s] set public key to rsa failed", operation);
+            break;
+        }
+        if (!EVP_PKEY_assign_RSA(pkey, r)) {
+            LOG_ERROR(Tag, "[%s] assign rsa to EVP_KEY failed", operation);
+            break;
+        }
+        *ppkey = pkey;
+
+        // 导出签名证书写入证书指针
+        if (!exportCertificate(TRUE, certContetBITS, ulCertLen)) {
+            LOG_ERROR(Tag, "[%s], export sign certificate by skf failed", operation);
+            break;
+        }
+        LOG_INFO(Tag, "export sign certificate by skf certLen[%d]", ulCertLen);
+
+        if ((b = BIO_new(BIO_s_mem())) == NULL) {
+            LOG_ERROR(Tag, "[%s], new BIO failed", operation);
+            break;
+        }
+
+        BIO_write(b, certContetBITS, ulCertLen);
+        *pcert = d2i_X509_bio(b, NULL);
+        if (*pcert == NULL) {
+            LOG_ERROR(Tag, "[%s], d2i_X509_bio failed", operation);
+            break;
+        }
+
+        iResult = 1;
+        LOG_INFO(Tag, "%s success", operation);
+    } while (false);
+
+    if (b != NULL) {
+        BIO_free(b);
+        b = NULL;
+    }
+
+    // 成功部分指针不需要清理
+    if (iResult == 1) {
+        return iResult;
+    }
+
+    if (r != NULL) {
+        RSA_free(r);
+        r = NULL;
+    }
+
+    if (pkey != NULL) {
+        EVP_PKEY_free(pkey);
+        pkey = NULL;
+    }
+    return iResult;
+}
+
+static int skf_load_ssl_client_cert(ENGINE* e, SSL* ssl, STACK_OF(X509_NAME) * ca_dn, X509** pcert,
+                                    EVP_PKEY** ppkey, STACK_OF(X509) * *pother,
+                                    UI_METHOD* ui_method, void* callback_data) {
+    const char* operation = "skf_load_ssl_client_cert";
+    LOG_DEBUG(Tag, "%s", operation);
+
+    if (getContainerType() == 1) {
+        return skf_load_rsa_client_cert(pcert, ppkey);
+    }
+    // only handle rsa, other return false
+    return 0;
+}
+```
+
+### 1.3. 私钥签名
 
 - ukey中的私钥不可以导出，所以要注册私钥签名函数到openssl中
 
@@ -340,7 +490,6 @@ int skf_rsa_priv_enc(int flen, const unsigned char* from, unsigned char* to, RSA
     return ret;
 }
 ```
-
 
 # 三、握手过程的调用栈
 

@@ -1347,6 +1347,8 @@ lookup_protocol:
     WARN_ON(!answer_prot->slab);
 
     err = -ENOMEM;
+	// 给sock结构体申请内存
+	//  同时把sk->sk_prot = answer_prot也就是对应的inetsw[proto]->prot
     sk = sk_alloc(net, PF_INET, GFP_KERNEL, answer_prot, kern);
     if (!sk)
         goto out;
@@ -1375,7 +1377,7 @@ lookup_protocol:
 
     sock_init_data(sock, sk);
 
-    sk->sk_destruct	   = inet_sock_destruct;
+    sk->sk_destruct	   = inet_sock_destruct;	// 设置sock结构体的析构函数
     sk->sk_protocol	   = protocol;
     sk->sk_backlog_rcv = sk->sk_prot->backlog_rcv;
 
@@ -1428,7 +1430,7 @@ out_rcu_unlock:
 }
 ```
 
-- tcp相关结构注册查看 [tcp初始化socket](/docs/linux-kernel/net/ipv4/tcp/#2-%E6%B3%A8%E5%86%8C%E5%88%B0socket%E9%87%8C%E9%9D%A2%E7%9A%84%E7%89%B9%E5%AE%9A%E7%BB%93%E6%9E%84)
+- tcp相关结构注册查看 [tcp初始化socket](/docs/linux/linux-kernel/net/ipv4/tcp/#2-%E6%B3%A8%E5%86%8C%E5%88%B0socket%E9%87%8C%E9%9D%A2%E7%9A%84%E7%89%B9%E5%AE%9A%E7%BB%93%E6%9E%84)
 
 ## 2. bind 绑定地址
 
@@ -1595,7 +1597,7 @@ out:
 }
 ```
 
-- `sk_prot->get_port`检查端口是否可用，tcp的调用到 [inet_sck_get_port](h/docs/linux-kernel/net/ipv4/tcp/#3-bind--sk_prot-get_port-%E6%A3%80%E6%9F%A5%E7%AB%AF%E5%8F%A3%E6%98%AF%E5%90%A6%E5%8F%AF%E7%94%A8)
+- `sk_prot->get_port`检查端口是否可用，tcp的调用到 [inet_sck_get_port](h/docs/linux/linux-kernel/net/ipv4/tcp/#3-bind--sk_prot-get_port-%E6%A3%80%E6%9F%A5%E7%AB%AF%E5%8F%A3%E6%98%AF%E5%90%A6%E5%8F%AF%E7%94%A8)
 
 ## 3. listen
 

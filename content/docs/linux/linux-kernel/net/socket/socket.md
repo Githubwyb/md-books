@@ -5,7 +5,7 @@ title: "socket总述"
 
 # 一、总述
 
-## 1. 结构体
+## 1. socket 相关内核结构体
 
 ```plantuml
 @startuml xxx
@@ -637,7 +637,200 @@ struct sock_common {
 };
 ```
 
-## 2. 相关系统调用
+
+### 1.3. minisock 缩减版本的socket
+
+- 部分场景下不需要sock那么大的结构体，需要缩减一下使用，所以内核定义了两个应对部分场景的结构体
+- 但是在部分处理时（如netfilter的钩子）中，拿到的是`struct sock *sk`，但是使用sock中的一些值会出问题，因为含义完全不同
+- 但是minisock中均定义了sock_common结构体，在sock_common中的成员含义是一致的，只是部分声明为了union，对不同sock有不同的使用
+- 判断是否为完整sock而非minisock的函数，处理就是判断`sk_state`，两个场景都有特定的`sk_state`
+
+```cpp
+// include/net/sock.h
+/* This helper checks if a socket is a full socket,
+ * ie _not_ a timewait or request socket.
+ */
+static inline bool sk_fullsock(const struct sock *sk)
+{
+	return (1 << sk->sk_state) & ~(TCPF_TIME_WAIT | TCPF_NEW_SYN_RECV);
+}
+```
+
+#### 1) request_sock 结构体
+
+- 服务端监听的socket接受到第一个syn包后，建立一个request_sock然后发送syn/ack，状态为`TCP_NEW_SYN_RECV`
+
+```cpp
+// include/net/request_sock.h
+/* struct request_sock - mini sock to represent a connection request
+ */
+struct request_sock {
+	struct sock_common		__req_common;
+#define rsk_refcnt			__req_common.skc_refcnt
+#define rsk_hash			__req_common.skc_hash
+#define rsk_listener			__req_common.skc_listener
+#define rsk_window_clamp		__req_common.skc_window_clamp
+#define rsk_rcv_wnd			__req_common.skc_rcv_wnd
+
+	struct request_sock		*dl_next;
+	u16				mss;
+	u8				num_retrans; /* number of retransmits */
+	u8				syncookie:1; /* syncookie: encode tcpopts in timestamp */
+	u8				num_timeout:7; /* number of timeouts */
+	u32				ts_recent;
+	struct timer_list		rsk_timer;
+	const struct request_sock_ops	*rsk_ops;
+	struct sock			*sk;
+	struct saved_syn		*saved_syn;
+	u32				secid;
+	u32				peer_secid;
+	u32				timeout;
+};
+```
+
+- 创建时sk_state即为`TCP_NEW_SYN_RECV`，判断状态是否为此可以判断是否为request_sock
+
+```cpp
+// net/ipv4/tcp_input.c
+struct request_sock *inet_reqsk_alloc(const struct request_sock_ops *ops,
+				      struct sock *sk_listener,
+				      bool attach_listener)
+{
+	struct request_sock *req = reqsk_alloc(ops, sk_listener,
+					       attach_listener);
+
+	if (req) {
+		struct inet_request_sock *ireq = inet_rsk(req);
+
+		ireq->ireq_opt = NULL;
+#if IS_ENABLED(CONFIG_IPV6)
+		ireq->pktopts = NULL;
+#endif
+		atomic64_set(&ireq->ir_cookie, 0);
+		ireq->ireq_state = TCP_NEW_SYN_RECV;
+		write_pnet(&ireq->ireq_net, sock_net(sk_listener));
+		ireq->ireq_family = sk_listener->sk_family;
+		req->timeout = TCP_TIMEOUT_INIT;
+	}
+
+	return req;
+}
+EXPORT_SYMBOL(inet_reqsk_alloc);
+```
+
+#### 2) inet_timewait_sock 结构体
+
+- 内核处理tcp在`TCP_FIN_WAIT2`状态收到一个`FIN`包后发送完`ACK`，会创建一个`inet_timewait_sock`处理`TCP_TIME_WAIT`状态，而原始的`sock`就直接`CLOSE`了
+
+```cpp
+// include/net/inet_timewait_sock.h
+/*
+ * This is a TIME_WAIT sock. It works around the memory consumption
+ * problems of sockets in such a state on heavily loaded servers, but
+ * without violating the protocol specification.
+ */
+struct inet_timewait_sock {
+	/*
+	 * Now struct sock also uses sock_common, so please just
+	 * don't add nothing before this first member (__tw_common) --acme
+	 */
+	struct sock_common	__tw_common;
+#define tw_family		__tw_common.skc_family
+#define tw_state		__tw_common.skc_state
+#define tw_reuse		__tw_common.skc_reuse
+#define tw_reuseport		__tw_common.skc_reuseport
+#define tw_ipv6only		__tw_common.skc_ipv6only
+#define tw_bound_dev_if		__tw_common.skc_bound_dev_if
+#define tw_node			__tw_common.skc_nulls_node
+#define tw_bind_node		__tw_common.skc_bind_node
+#define tw_refcnt		__tw_common.skc_refcnt
+#define tw_hash			__tw_common.skc_hash
+#define tw_prot			__tw_common.skc_prot
+#define tw_net			__tw_common.skc_net
+#define tw_daddr        	__tw_common.skc_daddr
+#define tw_v6_daddr		__tw_common.skc_v6_daddr
+#define tw_rcv_saddr    	__tw_common.skc_rcv_saddr
+#define tw_v6_rcv_saddr    	__tw_common.skc_v6_rcv_saddr
+#define tw_dport		__tw_common.skc_dport
+#define tw_num			__tw_common.skc_num
+#define tw_cookie		__tw_common.skc_cookie
+#define tw_dr			__tw_common.skc_tw_dr
+
+	__u32			tw_mark;
+	volatile unsigned char	tw_substate;
+	unsigned char		tw_rcv_wscale;
+
+	/* Socket demultiplex comparisons on incoming packets. */
+	/* these three are in inet_sock */
+	__be16			tw_sport;
+	/* And these are ours. */
+	unsigned int		tw_transparent  : 1,
+				tw_flowlabel	: 20,
+				tw_pad		: 3,	/* 3 bits hole */
+				tw_tos		: 8;
+	u32			tw_txhash;
+	u32			tw_priority;
+	struct timer_list	tw_timer;
+	struct inet_bind_bucket	*tw_tb;
+};
+```
+
+- 构造时，状态就是`TCP_TIME_WAIT`
+
+```cpp
+// net/ipv4/inet_timewait_sock.c
+struct inet_timewait_sock *inet_twsk_alloc(const struct sock *sk,
+					   struct inet_timewait_death_row *dr,
+					   const int state)
+{
+	struct inet_timewait_sock *tw;
+
+	if (refcount_read(&dr->tw_refcount) - 1 >=
+	    READ_ONCE(dr->sysctl_max_tw_buckets))
+		return NULL;
+
+	tw = kmem_cache_alloc(sk->sk_prot_creator->twsk_prot->twsk_slab,
+			      GFP_ATOMIC);
+	if (tw) {
+		const struct inet_sock *inet = inet_sk(sk);
+
+		tw->tw_dr	    = dr;
+		/* Give us an identity. */
+		tw->tw_daddr	    = inet->inet_daddr;
+		tw->tw_rcv_saddr    = inet->inet_rcv_saddr;
+		tw->tw_bound_dev_if = sk->sk_bound_dev_if;
+		tw->tw_tos	    = inet->tos;
+		tw->tw_num	    = inet->inet_num;
+		tw->tw_state	    = TCP_TIME_WAIT;
+		tw->tw_substate	    = state;
+		tw->tw_sport	    = inet->inet_sport;
+		tw->tw_dport	    = inet->inet_dport;
+		tw->tw_family	    = sk->sk_family;
+		tw->tw_reuse	    = sk->sk_reuse;
+		tw->tw_reuseport    = sk->sk_reuseport;
+		tw->tw_hash	    = sk->sk_hash;
+		tw->tw_ipv6only	    = 0;
+		tw->tw_transparent  = inet->transparent;
+		tw->tw_prot	    = sk->sk_prot_creator;
+		atomic64_set(&tw->tw_cookie, atomic64_read(&sk->sk_cookie));
+		twsk_net_set(tw, sock_net(sk));
+		timer_setup(&tw->tw_timer, tw_timer_handler, TIMER_PINNED);
+		/*
+		 * Because we use RCU lookups, we should not set tw_refcnt
+		 * to a non null value before everything is setup for this
+		 * timewait socket.
+		 */
+		refcount_set(&tw->tw_refcnt, 0);
+
+		__module_get(tw->tw_prot->owner);
+	}
+
+	return tw;
+}
+EXPORT_SYMBOL_GPL(inet_twsk_alloc);
+```
+
+## 4. 相关系统调用
 
 ```cpp
 SYSCALL_DEFINE3(socket, int, family, int, type, int, protocol);
@@ -792,7 +985,25 @@ static int __init af_unix_init(void) {
 // socket() -call-> __sys_socket() -call-> sock_create() -call-> __sock_create()
 int __sock_create(struct net *net, int family, int type, int protocol,
              struct socket **res, int kern) {
+	int err;
+	struct socket *sock;
+	const struct net_proto_family *pf;
     ...
+	// 给socket结构体申请内存
+	/*
+	 *	Allocate the socket and allow the family to set things up. if
+	 *	the protocol is 0, the family is instructed to select an appropriate
+	 *	default.
+	 */
+	sock = sock_alloc();
+	if (!sock) {
+		net_warn_ratelimited("socket: no more sockets\n");
+		return -ENFILE;	/* Not exactly a match, but its the
+				   closest posix thing */
+	}
+
+	sock->type = type;
+	...
     // 使用rcu锁锁定net_families结构体，取对应家族的pf结构体
     rcu_read_lock();
 	pf = rcu_dereference(net_families[family]);
@@ -818,8 +1029,9 @@ int __sock_create(struct net *net, int family, int type, int protocol,
 }
 ```
 
-- ipv4的create调用`inet_create`，查看 [ipv4创建socket](/docs/linux-kernel/net/ipv4/ipv4/#1-inet_create-socket%E5%88%9B%E5%BB%BA)
-- unix看 [unix创建socket](/docs/linux-kernel/net/unix/unix/#%E4%B8%80socket%E5%88%9B%E5%BB%BA)
+- ipv4的create调用`inet_create`，查看 [ipv4创建socket](/docs/linux/linux-kernel/net/ipv4/ipv4/#1-inet_create-socket%E5%88%9B%E5%BB%BA)
+- ipv6的create调用`inet6_create`，查看[ipv6创建socket]()
+- unix看 [unix创建socket](/docs/linux/linux-kernel/net/unix/unix/#%E4%B8%80socket%E5%88%9B%E5%BB%BA)
 
 ## 2. 创建socket后，创建fd，并将socket和fd绑定
 
@@ -867,7 +1079,21 @@ struct file *sock_alloc_file(struct socket *sock, int flags, const char *dname) 
 EXPORT_SYMBOL(sock_alloc_file);
 ```
 
-# 三、socket唤醒操作
+# 三、socket销毁过程
+
+## 1. `struct sock *sk`的销毁过程
+
+```cpp
+-> void sk_free(struct sock *sk)
+	-> static void __sk_free(struct sock *sk)
+		-> void sk_destruct(struct sock *sk)
+			-> static void __sk_destruct(struct rcu_head *head)
+				-> sk->sk_destruct(sk);
+```
+
+- ipv4和ipv6的`sk->sk_destruct`都定义为`inet_sock_destruct`，查看[ipv4的struct sock *sk销毁]()
+
+# 四、阻塞进程的socket唤醒操作
 
 - init时注册data_ready函数
 
@@ -903,7 +1129,7 @@ void sock_def_readable(struct sock *sk)
 
 - 各自协议内部有数据后进行调用
 
-# 四、bind 绑定地址
+# 五、bind 绑定地址
 
 - 端口传0会自动分配一个没有占用的端口给socket
 
@@ -952,9 +1178,9 @@ SYSCALL_DEFINE3(bind, int, fd, struct sockaddr __user *, umyaddr, int, addrlen)
 ```
 
 - 调用ops中的bind，ops在各个协议内部进行设置
-- ipv4的bind看 [bind 绑定地址](/docs/linux-kernel/net/ipv4/ipv4/#2-bind-%E7%BB%91%E5%AE%9A%E5%9C%B0%E5%9D%80)
+- ipv4的bind看 [bind 绑定地址](/docs/linux/linux-kernel/net/ipv4/ipv4/#2-bind-%E7%BB%91%E5%AE%9A%E5%9C%B0%E5%9D%80)
 
-# 五、listen 监听
+# 六、listen 监听
 
 ## 1. 系统调用
 
@@ -992,4 +1218,4 @@ SYSCALL_DEFINE2(listen, int, fd, int, backlog)
 }
 ```
 
-- `sock->ops->listen`调用到具体的 [ipv4调用inet_listen](/docs/linux-kernel/net/ipv4/ipv4/#3-listen) 、 [unix]() 、 [ipv6]()
+- `sock->ops->listen`调用到具体的 [ipv4调用inet_listen](/docs/linux/linux-kernel/net/ipv4/ipv4/#3-listen) 、 [unix]() 、 [ipv6]()
