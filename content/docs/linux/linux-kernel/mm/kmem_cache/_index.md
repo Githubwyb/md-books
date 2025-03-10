@@ -2,6 +2,19 @@
 title: "kmem_cache"
 ---
 
+- https://www.cnblogs.com/binlovetech/p/17434311.html
+- https://blog.csdn.net/xixihahalelehehe/article/details/118567692
+- https://blog.51cto.com/leejia/1431756
+- https://fivezh.github.io/2017/06/25/Linux-slab-info/
+- https://www.dingmos.com/index.php/archives/23/
+- https://blog.csdn.net/juS3Ve/article/details/79285745
+- https://www.cnblogs.com/binlovetech/p/17288990.html
+- https://www.cnblogs.com/yinsedeyinse/p/16468553.html
+- https://zhuanlan.zhihu.com/p/166649492
+- https://blog.csdn.net/lqy971966/article/details/119801912
+- https://stackoverflow.com/questions/22370102/difference-between-kmalloc-and-kmem-cache-alloc
+- https://blog.csdn.net/dongyoubin/article/details/127816671
+
 # 一、前言
 
 kmem_cache是slab管理器，每一个slab都是由kmem_cache进行管理的。`struct kmem_cache`有三种定义，SLAB、SLUB、SLOB。内核在高版本已经使用SLUB，当前介绍一下SLUB定义的kmem_cache相关原理，另外两个是类似的实现。

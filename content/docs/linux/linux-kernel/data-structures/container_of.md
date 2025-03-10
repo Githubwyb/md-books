@@ -6,7 +6,7 @@ title: "container_of() 根据成员地址找其所在结构体"
 # 一、源码
 
 ```cpp
-// include/linux/kernel.h
+// include/linux/container_of.h
 
 /**
  * container_of - cast a member of a structure out to the containing structure
@@ -49,7 +49,7 @@ struct treeNode {
 struct valueTemplate {
   treeNode node;
   int value;
-}
+};
 ```
 
 - 这样写，对树操作时不用关心value是啥，只需要关心自己的数据结构实现就好了
@@ -73,4 +73,5 @@ valueTemplate *value = (valueTemplate *)((char *)node  - (char *)&((valueTemplat
 
 - 加地址是向后偏移，减地址是向前偏移，所以这句话意思是通过成员变量找到结构体指针
 - 使用0地址的成员变量的地址偏移来计算结构体指针到成员变量的偏移量，然后用成员变量地址向前偏移去查找value
-- 这个想法是真的强大
+
+

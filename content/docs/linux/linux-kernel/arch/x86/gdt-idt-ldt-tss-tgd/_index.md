@@ -29,6 +29,8 @@ title: "gdt/idt/ldt/tss/tgd"
 
 # 一、数据结构
 
+## GDT&IDT
+
 ```cpp
 // arch/x86/include/asm/desc_defs.h
 // gdt结构
