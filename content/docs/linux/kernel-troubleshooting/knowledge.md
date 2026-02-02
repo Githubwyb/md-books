@@ -3,7 +3,7 @@ weight: 1
 title: "知识性说明"
 ---
 
-# 一、vmcore解析
+# 0x01 vmcore解析
 
 ## 1. 寄存器
 
@@ -24,3 +24,13 @@ title: "知识性说明"
 
 - 现代linux x86-64下gs里面存储了percpu的基地址，汇编中使用`%gs:0x15bc0`来取percpu的一些变量地址
 - 用户态无法使用gs寄存器
+
+# 0x02 perf
+
+## 1. perf安装
+
+### ubuntu
+
+```shell
+sudo apt install -y linux-tools-common linux-tools-generic linux-tools-$(uname -r)
+```

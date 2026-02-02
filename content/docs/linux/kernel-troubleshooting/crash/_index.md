@@ -1,5 +1,5 @@
 ---
-weight: 1
+weight: 2
 bookFlatSection: false
 bookCollapseSection: true
 title: "宕机vmcore分析"

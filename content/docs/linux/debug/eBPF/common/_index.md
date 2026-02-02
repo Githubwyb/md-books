@@ -13,3 +13,23 @@ eBPF是linux内核的一项革命性技术，可以在操作系统中运行沙�
 
 - bcc比较适合一些复杂的工具和代理使用
 - bpftrace比较适合写一些小的脚本和动态跟踪一些程序，bpftrace的依赖很少，一个二进制就可以运行
+
+# 三、bpf安装
+
+## 1. 源码安装
+
+### 1.1. 需要编译内核开启下面的选项
+
+```shell
+Symbol: DEBUG_INFO_BTF [=y]
+Type  : bool
+Defined at lib/Kconfig.debug:377
+   Prompt: Generate BTF type information
+   Depends on: DEBUG_INFO [=y] && !DEBUG_INFO_SPLIT [=n] && !DEBUG_INFO_REDUCED [=n] && (!GCC_PLUGIN_RANDSTRUCT [=n] || COMPILE_TEST [=n]) && BPF_SYSCALL [=y] && PAHOLE_VERSION [=125]>=116 && (DEBUG_INFO_DWARF4 [=n] || PAHOLE_VERSION [=125]>=121) && !HEXAGON
+   Location:
+     -> Kernel hacking
+       -> Compile-time checks and compiler options
+         -> Generate BTF type information (DEBUG_INFO_BTF [=y])
+```
+
+其中`PAHOLE_VERSION`需要安装dwarves才行，主要是需要有`pahole`命令，版本大于内核要求版本
